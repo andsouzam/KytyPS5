@@ -1218,6 +1218,9 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		if (range.size == 0 || desc.info.resources.levels != 1 || image.info.resources.levels != 1) {
 			return;
 		}
+		if (desc.type == BindingType::VideoOut && (image.usage.render_target || image.IsGpuModified())) {
+			return;
+		}
 	}
 	const auto layers = desc.info.TransferLayers();
 	// These one-mip surfaces use complete 4 KiB color metadata blocks.
