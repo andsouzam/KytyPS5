@@ -381,19 +381,7 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 
 	(void)poll;
 
-	const auto vaddr = reinterpret_cast<uint64_t>(addr);
-
-	if (wait_op != 0) {
-		BufferFlushAndWait();
-	}
-
-	if (m_renderer.GetBufferCache().IsRegionGpuModified(vaddr, sizeof(T))) {
-		m_renderer.GetBufferCache().ReadMemory(vaddr, sizeof(T), false);
-	}
-
 	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
-		BufferFlush();
-
 		static std::atomic<uint32_t> wait_reg_logs {0};
 		const auto log_id = wait_reg_logs.fetch_add(1, std::memory_order_relaxed);
 		// Soft-stall after Flip often lands here after the first 64 logs; keep
@@ -412,7 +400,6 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 				     reinterpret_cast<uint64_t>(addr), static_cast<uint64_t>(*addr),
 				     static_cast<uint64_t>(ref), static_cast<uint64_t>(mask), func, log_id);
 			}
-			Log::Flush();
 		}
 		SuspendPm4();
 	}
@@ -575,7 +562,7 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 1000);
+					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
