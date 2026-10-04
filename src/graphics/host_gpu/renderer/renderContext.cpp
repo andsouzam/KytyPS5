@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
@@ -60,6 +61,12 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	constexpr uint64_t fault_size = 1;
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
+	}
+	if (access == PageFaultAccess::Execute) {
+		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		Common::VirtualMemory::Protect(fault_vaddr & ~0x3FFFull, 0x4000,
+		                               Common::VirtualMemory::Mode::ExecuteReadWrite);
+		return true;
 	}
 	if (access == PageFaultAccess::Write) {
 		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);

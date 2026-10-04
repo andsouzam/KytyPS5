@@ -7843,11 +7843,12 @@ void TestCleanScalarBufferOutOfBounds() {
 
 void TestGpuSelectedRawBufferAdmission() {
   struct Case { ValueOpcode opcode; uint32_t words; bool formatted; bool typed; bool admitted; };
-  for (const auto input : {Case{ValueOpcode::LoadBufferU32x2, 2u, false, false, true},
+  for (const auto input : {Case{ValueOpcode::LoadBufferU32, 1u, false, false, true},
+                          Case{ValueOpcode::LoadBufferU32x2, 2u, false, false, true},
                           Case{ValueOpcode::LoadBufferU32x3, 3u, false, false, true},
                           Case{ValueOpcode::LoadBufferU32x4, 4u, false, false, true},
-                          Case{ValueOpcode::LoadBufferU32, 1u, false, false, false},
-                          Case{ValueOpcode::LoadBufferU32x4, 4u, true, false, false},
+                          Case{ValueOpcode::LoadBufferU32, 1u, true, false, true},
+                          Case{ValueOpcode::LoadBufferU32x4, 4u, true, false, true},
                           Case{ValueOpcode::LoadBufferU32x4, 4u, false, true, false},
                           Case{ValueOpcode::StoreBufferU32, 1u, false, false, false}}) {
     Fixture fixture;

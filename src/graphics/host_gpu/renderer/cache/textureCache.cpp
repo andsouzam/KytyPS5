@@ -745,7 +745,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested, BindingTyp
 	} else {
 		info.resources = std::max(requested.resources, cached.info.resources);
 	}
-	info.htile_clear_mask     = 0;
+	info.htile_clear_mask.reset();
 	const auto replacement_id = InsertImage(info);
 	auto&      replacement    = m_slot_images[replacement_id];
 	replacement.usage         = cached.usage;
@@ -1373,8 +1373,14 @@ ImageId TextureCache::FindSampledHtileImage(ImageDesc& desc) {
 			    info.samples == requested.samples && info.bytes_per_block == requested.bytes_per_block &&
 			    info.guest_format == requested.guest_format && info.tile_mode == requested.tile_mode &&
 			    info.metadata.kind == ImageMetadataKind::Htile;
-			if (!matches || (result && result != id)) {
-				EXIT("sampled HTile import requires an exact nonoverlapping depth owner\n");
+			if (!matches) {
+				continue;
+			}
+			if (result && result != id) {
+				if (exact_ranges) {
+					result = id;
+				}
+				continue;
 			}
 			result = id;
 		}
@@ -1430,7 +1436,7 @@ ImageId TextureCache::FindSampledHtileImage(ImageDesc& desc) {
 		     htile_size.size, htile_size.align);
 	}
 	uint32_t clear                = 0;
-	bool     tracked_clear_known = layers <= 32;
+	bool     tracked_clear_known = layers <= MAX_META_SLICES;
 	for (uint32_t layer = 0; tracked_clear_known && layer < layers; layer++) {
 		uint32_t layer_fill       = 0;
 		bool     layer_fill_known = false;
@@ -1495,7 +1501,7 @@ ImageId TextureCache::FindSampledHtileImage(ImageDesc& desc) {
 	}
 	if (!id) {
 		auto info = requested;
-		info.htile_clear_mask = 0;
+		info.htile_clear_mask.reset();
 		id = InsertImage(info);
 		m_slot_images[id].sampled_htile_clear_import = true;
 	}
@@ -1517,7 +1523,9 @@ ImageId TextureCache::FindSampledHtileImage(ImageDesc& desc) {
 			EXIT("sampled HTile clear state disappeared during materialization\n");
 		}
 		for (uint32_t layer = 0; layer < layers; layer++) {
-			tracked->second.clear_mask &= ~(1u << layer);
+			if (layer < MAX_META_SLICES) {
+				tracked->second.clear_mask.reset(layer);
+			}
 		}
 	}
 	TrackImage(id);
@@ -1601,11 +1609,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		    FindImagesInRegion(desc.info.data.address, desc.info.data.size, false);
 
 		for (const auto id: candidates) {
-			auto& imported = m_slot_images[id];
-			if (!imported.sampled_htile_clear_import) {
+			auto* imported = m_slot_images.try_get(id);
+			if (imported == nullptr || !imported->sampled_htile_clear_import) {
 				continue;
 			}
-			const auto& owner = imported.info;
+			const auto& owner = imported->info;
 			// The HTile clear has already been materialized into this native D32
 			// image. An exact depth-attachment binding can take over that image
 			// without reading stale guest depth bytes or changing its pixels.
@@ -1619,15 +1627,16 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			    owner.metadata.range == desc.info.metadata.range &&
 			    owner.metadata.compression == desc.info.metadata.compression &&
 			    owner.metadata.stencil_compressed == desc.info.metadata.stencil_compressed &&
-			    !imported.IsCpuDirty() && !imported.IsBufferModified();
+			    !imported->IsCpuDirty() && !imported->IsBufferModified();
 			if (!same_depth_owner) {
-				EXIT("sampled HTile import requires its metadata-aware lookup path\n");
+				FreeImage(id);
+				continue;
 			}
-			imported.sampled_htile_clear_import = false;
+			imported->sampled_htile_clear_import = false;
 		}
 		for (const auto id: candidates) {
-			const auto& image = m_slot_images[id];
-			if (SameBacking(image.info, desc.info, exact_format)) {
+			const auto* image = m_slot_images.try_get(id);
+			if (image != nullptr && SameBacking(image->info, desc.info, exact_format)) {
 				result = id;
 			}
 		}
@@ -1636,6 +1645,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		int32_t view_layer = -1;
 		if (!result) {
 			for (const auto candidate: candidates) {
+				if (m_slot_images.try_get(candidate) == nullptr) {
+					continue;
+				}
 				view_mip                = -1;
 				view_layer              = -1;
 				const auto& merged_info = result ? m_slot_images[result].info : desc.info;
@@ -2340,12 +2352,12 @@ bool TextureCache::IsMeta(uint64_t address) {
 bool TextureCache::IsMetaCleared(uint64_t address, uint32_t slice, uint32_t* fill_value, bool* fill_known) {
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
-	if (found == m_surface_metas.end() || slice >= 32) {
+	if (found == m_surface_metas.end() || slice >= MAX_META_SLICES) {
 		return false;
 	}
 	if (fill_value != nullptr) *fill_value = found->second.fill_value;
 	if (fill_known != nullptr) *fill_known = found->second.fill_known;
-	return (found->second.clear_mask & (1u << slice)) != 0;
+	return found->second.clear_mask.test(slice);
 }
 
 bool TextureCache::ClearMeta(uint64_t address) {
@@ -2354,7 +2366,7 @@ bool TextureCache::ClearMeta(uint64_t address) {
 	if (found == m_surface_metas.end()) {
 		return false;
 	}
-	found->second.clear_mask = UINT32_MAX;
+	found->second.clear_mask.set();
 	found->second.fill_known = false;
 	return true;
 }
@@ -2365,7 +2377,7 @@ bool TextureCache::ClearMeta(uint64_t address, uint32_t fill_value) {
 	if (found == m_surface_metas.end()) {
 		return false;
 	}
-	found->second.clear_mask = UINT32_MAX;
+	found->second.clear_mask.set();
 	found->second.fill_value = fill_value;
 	found->second.fill_known = true;
 	return true;
@@ -2374,14 +2386,10 @@ bool TextureCache::ClearMeta(uint64_t address, uint32_t fill_value) {
 bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 	std::scoped_lock lock {m_lock};
 	const auto       found = m_surface_metas.find(address);
-	if (found == m_surface_metas.end() || slice >= 32) {
+	if (found == m_surface_metas.end() || slice >= MAX_META_SLICES) {
 		return false;
 	}
-	if (is_clear) {
-		found->second.clear_mask |= 1u << slice;
-	} else {
-		found->second.clear_mask &= ~(1u << slice);
-	}
+	found->second.clear_mask.set(slice, is_clear);
 	return true;
 }
 

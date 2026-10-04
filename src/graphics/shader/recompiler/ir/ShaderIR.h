@@ -73,9 +73,9 @@ struct MemoryInfo {
 	bool                    planning_only            = false;
 
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
-		return !formatted && !typed && data_bits == 32u &&
-		       (opcode == ValueOpcode::LoadBufferU32x2 || opcode == ValueOpcode::LoadBufferU32x3 ||
-		        opcode == ValueOpcode::LoadBufferU32x4);
+		return !typed && data_bits == 32u &&
+		       (opcode == ValueOpcode::LoadBufferU32 || opcode == ValueOpcode::LoadBufferU32x2 ||
+		        opcode == ValueOpcode::LoadBufferU32x3 || opcode == ValueOpcode::LoadBufferU32x4);
 	}
 
 	bool operator==(const MemoryInfo& other) const = default;
@@ -491,14 +491,14 @@ struct BufferTableLayout {
 struct ShaderInfo {
 	// Bounded/inline buffer tables expand unique dense descriptors from large SRT
 	// candidate counts (Yōtei CS 0x8457901d… walks count=65536). Match the MaxImages
-	// compiler budget of 512; Vulkan DescriptorBudget remains the hard device gate.
-	static constexpr uint32_t MaxBuffers      = 512;
-	// Inline sampled tables (Yōtei PS f8927c09) expand to ~115 dense images /
-	// pairs after selector-limited probes; keep a compiler budget of 512 with
+	// compiler budget of 2048; Vulkan DescriptorBudget remains the hard device gate.
+	static constexpr uint32_t MaxBuffers      = 2048;
+	// Inline sampled tables (Yōtei PS f8927c09 / CS b629e577) expand to ~753 dense images /
+	// pairs after selector-limited probes; keep a compiler budget of 2048 with
 	// device checks (documented Yōtei bring-up contract).
-	static constexpr uint32_t MaxImages       = 512;
-	static constexpr uint32_t MaxSamplers     = 32;
-	static constexpr uint32_t MaxSampledPairs = 512;
+	static constexpr uint32_t MaxImages       = 2048;
+	static constexpr uint32_t MaxSamplers     = 128;
+	static constexpr uint32_t MaxSampledPairs = 2048;
 
 	std::vector<BoundedSrtLayout>     bounded_srt_reads;
 	std::vector<BufferTableLayout>    buffer_tables;

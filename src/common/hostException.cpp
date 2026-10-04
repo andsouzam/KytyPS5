@@ -111,6 +111,8 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 		info.access_violation_vaddr = exception_record->ExceptionInformation[1];
 	} else if (exception_record->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION) {
 		info.type = ExceptionType::IllegalInstruction;
+	} else if (exception_record->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO) {
+		info.type = ExceptionType::IntegerDivideByZero;
 	} else {
 		return EXCEPTION_CONTINUE_SEARCH;
 	}

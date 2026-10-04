@@ -3825,8 +3825,22 @@ bool ProtectGuestMemory(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode,
 }
 
 bool ProtectGuestHostMemory(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
-	return g_guest_address_space != nullptr &&
-	       g_guest_address_space->ProtectTransient(vaddr, size, mode);
+	if (g_guest_address_space == nullptr) {
+		return false;
+	}
+	if (g_virtual_ranges != nullptr && mode != VirtualMemory::Mode::NoAccess) {
+		VirtualRanges::Range range {};
+		if (g_virtual_ranges->QueryOverlap(vaddr, size, &range)) {
+			if (range.type == VirtualRangeType::Code || (range.protection & PROT_CPU_EXEC) != 0) {
+				if (mode == VirtualMemory::Mode::Read) {
+					mode = VirtualMemory::Mode::ExecuteRead;
+				} else if (mode == VirtualMemory::Mode::ReadWrite) {
+					mode = VirtualMemory::Mode::ExecuteReadWrite;
+				}
+			}
+		}
+	}
+	return g_guest_address_space->ProtectTransient(vaddr, size, mode);
 }
 
 bool FreeGuestMemory(uint64_t vaddr, uint64_t size) {

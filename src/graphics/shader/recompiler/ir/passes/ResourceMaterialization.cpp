@@ -26,10 +26,10 @@ namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 constexpr uint64_t RegisteredBufferAddressLimit = uint64_t{1} << 40u;
-constexpr uint64_t MaxIndirectImageProbes = 65536u;
+constexpr uint64_t MaxIndirectImageProbes = 524288u;
 // Storage reservations and logical probe counts have separate budgets.
-constexpr uint64_t MaxBoundedSnapshotProbes = 65536u;
-constexpr uint64_t MaxBoundedSnapshotBytes = 64u * 1024u * 1024u;
+constexpr uint64_t MaxBoundedSnapshotProbes = 524288u;
+constexpr uint64_t MaxBoundedSnapshotBytes = 128u * 1024u * 1024u;
 constexpr uint64_t MaxBoundedSnapshotWords = MaxBoundedSnapshotBytes / sizeof(uint32_t);
 
 thread_local std::string g_last_specialization_error;

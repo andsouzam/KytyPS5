@@ -10,10 +10,20 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <bitset>
 #include <cmath>
 #include <cstdint>
 
 namespace Libs::Graphics {
+
+constexpr size_t MAX_META_SLICES = 8192;
+using MetaClearMask = std::bitset<MAX_META_SLICES>;
+
+inline MetaClearMask AllMetaCleared() {
+	MetaClearMask mask;
+	mask.set();
+	return mask;
+}
 
 enum class VideoOutCompression : uint8_t { Uncompressed, Dcc256_256_0, Dcc256_64_64, Unsupported };
 
@@ -57,7 +67,7 @@ struct ImageInfo {
 	GuestRange                   data;
 	GuestRange                   stencil;
 	ImageMetadataInfo            metadata;
-	uint32_t                     htile_clear_mask = UINT32_MAX;
+	MetaClearMask                htile_clear_mask = AllMetaCleared();
 	vk::Format                   pixel_format     = vk::Format::eUndefined;
 	Prospero::BufferFormat       guest_format     = Prospero::BufferFormat::kInvalid;
 	Prospero::ImageType          type             = Prospero::ImageType::kColor2D;

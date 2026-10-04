@@ -1417,7 +1417,7 @@ static int ReadHostFileToGuest(const std::string& host_path, uint64_t file_offse
 	}
 
 	Common::File file;
-	if (!file.Open(host_path, Common::File::Mode::Read)) {
+	if (!file.Open(Common::PathFromUtf8(host_path), Common::File::Mode::Read)) {
 		LOGF("\tAPR read missing host file: %s\n", host_path.c_str());
 		return LibKernel::KERNEL_ERROR_ENOENT;
 	}

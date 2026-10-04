@@ -198,7 +198,8 @@ void EmitReturn(ValueEmitContext& ctx) {
 uint32_t EmitGraphicsLoopWithinBudget(ValueEmitContext& ctx) {
 	auto& state = ctx.state;
 	EXIT_IF(state.graphics_loop_counter_variable == 0);
-	constexpr uint32_t MaxGraphicsLoopIterations = 256;
+	const uint32_t MaxGraphicsLoopIterations = (state.stage == ShaderType::Compute ? 1024u :
+	                                            (state.stage == ShaderType::Vertex ? 32u : 64u));
 	const auto counter = state.builder.AllocateId();
 	const auto within  = state.builder.AllocateId();
 	const auto next    = state.builder.AllocateId();
@@ -1042,8 +1043,8 @@ void EmitProgram(EmitterState& state) {
 		state.pixel_valid_mask_variable = state.builder.AllocateId();
 		state.builder.AddName(state.pixel_valid_mask_variable, "pixel_valid_mask_active");
 	}
-	if (state.stage == ShaderType::Pixel && state.wave_size == 64u &&
-	    state.native_subgroup_size == 32u &&
+	if ((state.stage == ShaderType::Pixel || state.stage == ShaderType::Vertex || state.stage == ShaderType::Compute) &&
+	    state.wave_size == 64u && state.native_subgroup_size == 32u &&
 	    std::ranges::any_of(program.block_info,
 	                        [](const IR::BlockInfo& info) { return info.terminator.loop_header; })) {
 		state.graphics_loop_counter_variable = state.builder.AllocateId();

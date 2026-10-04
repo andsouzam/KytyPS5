@@ -254,9 +254,12 @@ constexpr VopcOpcodeInfo VOPC_OPCODE_LIST[] = {
     {0xd2u, Opcode::V_CMPX_EQ_U32},        {0xd3u, Opcode::V_CMPX_LE_U32},
     {0xd4u, Opcode::V_CMPX_GT_U32},        {0xd5u, Opcode::V_CMPX_NE_U32},
     {0xd6u, Opcode::V_CMPX_GE_U32},        {0xe1u, Opcode::V_CMP_LT_U64, false},
-    {0xe2u, Opcode::V_CMP_EQ_U64, false},  {0xe4u, Opcode::V_CMP_GT_U64, false},
-    {0xe5u, Opcode::V_CMP_NE_U64, false},
-    {0xf5u, Opcode::V_CMPX_NE_U64, false}, {0xc9u, Opcode::V_CMP_LT_F16},
+    {0xe2u, Opcode::V_CMP_EQ_U64, false},  {0xe3u, Opcode::V_CMP_LE_U64, false},
+    {0xe4u, Opcode::V_CMP_GT_U64, false},  {0xe5u, Opcode::V_CMP_NE_U64, false},
+    {0xe6u, Opcode::V_CMP_GE_U64, false},  {0xf1u, Opcode::V_CMPX_LT_U64, false},
+    {0xf2u, Opcode::V_CMPX_EQ_U64, false}, {0xf3u, Opcode::V_CMPX_LE_U64, false},
+    {0xf4u, Opcode::V_CMPX_GT_U64, false}, {0xf5u, Opcode::V_CMPX_NE_U64, false},
+    {0xf6u, Opcode::V_CMPX_GE_U64, false}, {0xc9u, Opcode::V_CMP_LT_F16},
     {0xcau, Opcode::V_CMP_EQ_F16},         {0xcbu, Opcode::V_CMP_LE_F16},
     {0xccu, Opcode::V_CMP_GT_F16},         {0xcdu, Opcode::V_CMP_LG_F16},
     {0xceu, Opcode::V_CMP_GE_F16},         {0xebu, Opcode::V_CMP_NGT_F16},
@@ -1565,6 +1568,11 @@ bool IsVopcCompareExec(Opcode opcode) {
 		case Opcode::V_CMPX_NE_U32:
 		case Opcode::V_CMPX_GE_U32:
 		case Opcode::V_CMPX_NE_I64:
+		case Opcode::V_CMPX_LT_U64:
+		case Opcode::V_CMPX_EQ_U64:
+		case Opcode::V_CMPX_LE_U64:
+		case Opcode::V_CMPX_GT_U64:
+		case Opcode::V_CMPX_GE_U64:
 		case Opcode::V_CMPX_NE_U64:
 		case Opcode::V_CMPX_LT_U16:
 		case Opcode::V_CMPX_EQ_U16:

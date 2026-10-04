@@ -83,10 +83,10 @@ private:
 	struct MetaDataInfo {
 		enum class Type : uint8_t { CMask, FMask, HTile };
 
-		Type     type;
-		uint32_t clear_mask = UINT32_MAX;
-		uint32_t fill_value = 0;
-		bool fill_known = false;
+		Type          type;
+		MetaClearMask clear_mask = AllMetaCleared();
+		uint32_t      fill_value = 0;
+		bool          fill_known = false;
 	};
 
 	struct OverlapResult {

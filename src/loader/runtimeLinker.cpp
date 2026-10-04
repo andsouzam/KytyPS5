@@ -663,6 +663,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		return true;
 	}
 
+	if (info->type == Common::HostException::ExceptionType::IntegerDivideByZero &&
+	    Loader::X64InstructionEmulator::TryEmulateDivideByZero(info->native_context)) {
+		return true;
+	}
+
 	if (info->type == Common::HostException::ExceptionType::AccessViolation) {
 		using CoreAccess = Common::HostException::AccessViolationType;
 		using GpuAccess  = Libs::Graphics::PageFaultAccess;
@@ -675,6 +680,12 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			return true;
+		}
+		if (info->access_violation_type == CoreAccess::Execute) {
+			if (Common::VirtualMemory::Protect(info->access_violation_vaddr & ~0x3FFFull, 0x4000,
+			                                   Common::VirtualMemory::Mode::ExecuteReadWrite)) {
+				return true;
+			}
 		}
 	}
 	// Report whatever guest context can be read safely before terminating: which guest thread

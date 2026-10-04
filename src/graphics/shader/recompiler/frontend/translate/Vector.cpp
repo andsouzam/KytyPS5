@@ -103,12 +103,49 @@ void Translator::EmitVector(const Decoder::Instruction& inst) {
 		case O::V_CMP_LT_U64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::ULessThan64, IR::Type::U64, false, false);
 			return;
+		case O::V_CMP_LE_U64: {
+			const auto lhs = ReadOperand(inst.src0, IR::Type::U64);
+			const auto rhs = ReadOperand(inst.src1, IR::Type::U64);
+			const auto gt  = IR::U1(ir.Emit(IR::ValueOpcode::UGreaterThan64, {lhs, rhs}));
+			EmitCompareResult(inst, ir.LogicalNot(gt), false, false);
+			return;
+		}
 		case O::V_CMP_GT_U64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::UGreaterThan64, IR::Type::U64, false, false);
 			return;
+		case O::V_CMP_GE_U64: {
+			const auto lhs = ReadOperand(inst.src0, IR::Type::U64);
+			const auto rhs = ReadOperand(inst.src1, IR::Type::U64);
+			const auto lt  = IR::U1(ir.Emit(IR::ValueOpcode::ULessThan64, {lhs, rhs}));
+			EmitCompareResult(inst, ir.LogicalNot(lt), false, false);
+			return;
+		}
 		case O::V_CMP_NE_U64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual64, IR::Type::U64, false, false);
 			return;
+		case O::V_CMPX_EQ_U64:
+			EmitIntegerCompare(inst, IR::ValueOpcode::IEqual64, IR::Type::U64, false, true);
+			return;
+		case O::V_CMPX_LT_U64:
+			EmitIntegerCompare(inst, IR::ValueOpcode::ULessThan64, IR::Type::U64, false, true);
+			return;
+		case O::V_CMPX_LE_U64: {
+			const auto lhs = ReadOperand(inst.src0, IR::Type::U64);
+			const auto rhs = ReadOperand(inst.src1, IR::Type::U64);
+			const auto gt  = IR::U1(ir.Emit(IR::ValueOpcode::UGreaterThan64, {lhs, rhs}));
+			EmitCompareResult(inst, ir.LogicalNot(gt), false, true);
+			return;
+		}
+		case O::V_CMPX_GT_U64:
+			EmitIntegerCompare(inst, IR::ValueOpcode::UGreaterThan64, IR::Type::U64, false, true);
+			return;
+		case O::V_CMPX_GE_U64: {
+			const auto lhs = ReadOperand(inst.src0, IR::Type::U64);
+			const auto rhs = ReadOperand(inst.src1, IR::Type::U64);
+			const auto lt  = IR::U1(ir.Emit(IR::ValueOpcode::ULessThan64, {lhs, rhs}));
+			EmitCompareResult(inst, ir.LogicalNot(lt), false, true);
+			return;
+		}
 		case O::V_CMPX_NE_I64:
 		case O::V_CMPX_NE_U64:
 			EmitIntegerCompare(inst, IR::ValueOpcode::INotEqual64, IR::Type::U64, false, true);

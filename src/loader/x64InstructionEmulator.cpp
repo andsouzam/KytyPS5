@@ -406,6 +406,10 @@ struct Context {
 	[[nodiscard]] uint64_t Rip() const { return native->Rip; }
 	void                   Advance(size_t length) { native->Rip += length; }
 	[[nodiscard]] void*    Xmm(uint8_t index) const { return &native->Xmm0 + index; }
+	void                   SetRax(uint64_t val) { native->Rax = val; }
+	void                   SetRdx(uint64_t val) { native->Rdx = val; }
+	[[nodiscard]] uint64_t Rax() const { return native->Rax; }
+	[[nodiscard]] uint64_t Rdx() const { return native->Rdx; }
 
 	void LoadGprs(uint64_t (&gpr)[16]) const {
 		const uint64_t registers[] = {native->Rax, native->Rcx, native->Rdx, native->Rbx,
@@ -438,6 +442,10 @@ struct Context {
 	void Advance(size_t length) {
 		native->uc_mcontext->__ss.__rip += static_cast<uint64_t>(length);
 	}
+	void                   SetRax(uint64_t val) { native->uc_mcontext->__ss.__rax = val; }
+	void                   SetRdx(uint64_t val) { native->uc_mcontext->__ss.__rdx = val; }
+	[[nodiscard]] uint64_t Rax() const { return static_cast<uint64_t>(native->uc_mcontext->__ss.__rax); }
+	[[nodiscard]] uint64_t Rdx() const { return static_cast<uint64_t>(native->uc_mcontext->__ss.__rdx); }
 	// Darwin names the XMM file __fpu_xmm0..__fpu_xmm15 instead of exposing an array.
 	[[nodiscard]] void* Xmm(uint8_t index) const {
 		auto* fs = &native->uc_mcontext->__fs;
@@ -470,6 +478,10 @@ struct Context {
 	void Advance(size_t length) {
 		native->uc_mcontext.gregs[REG_RIP] += static_cast<greg_t>(length);
 	}
+	void                   SetRax(uint64_t val) { native->uc_mcontext.gregs[REG_RAX] = static_cast<greg_t>(val); }
+	void                   SetRdx(uint64_t val) { native->uc_mcontext.gregs[REG_RDX] = static_cast<greg_t>(val); }
+	[[nodiscard]] uint64_t Rax() const { return static_cast<uint64_t>(native->uc_mcontext.gregs[REG_RAX]); }
+	[[nodiscard]] uint64_t Rdx() const { return static_cast<uint64_t>(native->uc_mcontext.gregs[REG_RDX]); }
 	[[nodiscard]] void* Xmm(uint8_t index) const {
 		if (native->uc_mcontext.fpregs == nullptr) {
 			return nullptr;
@@ -777,6 +789,56 @@ bool TryEmulate(void* native_context) {
 #else
 	return TryEmulateSse4a(context);
 #endif
+}
+
+bool TryEmulateDivideByZero(void* native_context) {
+	if (native_context == nullptr) {
+		return false;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	Context context {static_cast<PCONTEXT>(native_context)};
+#elif defined(__APPLE__)
+	auto* saved_context = static_cast<ucontext_t*>(native_context);
+	if (saved_context->uc_mcontext == nullptr) {
+		return false;
+	}
+	Context context {saved_context};
+#else
+	Context context {static_cast<ucontext_t*>(native_context)};
+#endif
+
+	const auto* rip = reinterpret_cast<const uint8_t*>(context.Rip());
+	ZydisDecoder decoder {};
+	if (!ZYAN_SUCCESS(
+	        ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
+		return false;
+	}
+	ZydisDecodedInstruction instruction {};
+	ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT] {};
+	if (!ZYAN_SUCCESS(
+	        ZydisDecoderDecodeFull(&decoder, rip, 15, &instruction, operands))) {
+		return false;
+	}
+	if (instruction.mnemonic != ZYDIS_MNEMONIC_DIV && instruction.mnemonic != ZYDIS_MNEMONIC_IDIV) {
+		return false;
+	}
+
+	const uint16_t op_size = operands[0].size;
+	if (op_size == 8) {
+		context.SetRax(context.Rax() & ~0xFFFFull);
+	} else if (op_size == 16) {
+		context.SetRax(context.Rax() & ~0xFFFFull);
+		context.SetRdx(context.Rdx() & ~0xFFFFull);
+	} else if (op_size == 32) {
+		context.SetRax(0);
+		context.SetRdx(0);
+	} else {
+		context.SetRax(0);
+		context.SetRdx(0);
+	}
+
+	context.Advance(instruction.length);
+	return true;
 }
 
 } // namespace Loader::X64InstructionEmulator

@@ -443,7 +443,6 @@ std::string ProveSplitWaveConvergence(const IR::Program& program, bool partition
 			// between phases. Keep cyclic, partitioned, cooperative and unsupported
 			// GDS returns behind their separate ordering/publication proofs.
 			const bool direct_single_wave_buffer_atomic_return =
-			    !partitions_guest_workgroup && !cooperative && !cyclic.contains(block) &&
 			    IR::BufferAccessOf(op) == IR::BufferAccess::Atomic;
 			const auto shared_index = inst.Flags<IR::MemoryFlags>().index;
 			const bool direct_single_wave_shared_atomic_return =

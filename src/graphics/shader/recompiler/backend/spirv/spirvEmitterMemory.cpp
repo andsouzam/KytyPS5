@@ -1133,8 +1133,9 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 	    Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 1),
 	           Select(state, TypeU32(state), add_tid, BufferLane(state), ConstantU32(state, 0)));
 	const auto soffset = ctx.Arg(inst, 3);
-	const auto base    = DeviceAddressFromWords(state, ctx.Arg(handle, 0), field(word1, 0, 16));
-	const auto valid_format    = nonzero(field(word3, 12, 7));
+	const auto base            = DeviceAddressFromWords(state, ctx.Arg(handle, 0), field(word1, 0, 16));
+	const auto mem             = ctx.Memory(inst);
+	const auto valid_format    = mem.formatted ? nonzero(field(word3, 12, 7)) : ConstantBool(state, true);
 	const auto mode            = field(word3, 28, 2);
 	const auto index_in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index, records);
 	const auto scalar_in_bounds =
@@ -1142,6 +1143,7 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 	const auto raw_records = Binary(state, spv::OpISub, TypeU32(state), records, soffset);
 	const auto raw_index_in_bounds =
 	    Binary(state, spv::OpULessThan, TypeBool(state), index, raw_records);
+	const auto exec = ctx.Arg(inst, inst.NumArgs() - 1);
 	std::array<uint32_t, 4> values {};
 	for (uint32_t component = 0; component < components; component++) {
 		const auto address = CalculateBufferAddress(state, index, ctx.Arg(inst, 2), soffset,
@@ -1171,7 +1173,10 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_
 		const auto guest =
 		    Binary(state, spv::OpIAdd, TypeScalarU64(state), base,
 		           Unary(state, spv::OpUConvert, TypeScalarU64(state), address.byte));
-		values[component] = LoadBda(ctx, guest, AndCondition(state, valid_format, in_bounds), 32u);
+		values[component] = LoadBda(ctx, guest, AndCondition(state, exec, AndCondition(state, valid_format, in_bounds)), 32u);
+	}
+	if (components == 1u) {
+		return values[0];
 	}
 	return ConstructU32Composite(state, components, values);
 }
@@ -1668,7 +1673,9 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto shared_components = IR::SharedComponentCount(op);
 	const auto address_info      = IR::AddressOpcodeInfoOf(op);
 	uint32_t   value;
-	if (buffer_components > 1u)
+	if (mem.kind == IR::ResourceKind::IndirectBuffer)
+		value = LoadIndirectBuffer(ctx, inst, buffer_components != 0u ? buffer_components : 1u);
+	else if (buffer_components > 1u)
 		value = LoadWideBuffer(ctx, inst, buffer_components);
 	else if (shared_components > 1u)
 		value = LoadWideShared(ctx, inst, shared_components);
