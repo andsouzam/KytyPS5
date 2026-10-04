@@ -31,6 +31,12 @@ LIB_NAME("libkernel", "libkernel");
 constexpr int      DESCRIPTOR_MIN = 3;
 constexpr uint64_t DIR_BLOCK_SIZE = 512;
 
+static bool ShouldLogIoChunk() {
+	static std::atomic<uint32_t> s_io_chunk_logs {0};
+	const auto count = s_io_chunk_logs.fetch_add(1, std::memory_order_relaxed);
+	return count < 64 || (count % 4096u) == 0;
+}
+
 enum class SpecialFile {
 	None,
 	Random,
@@ -567,7 +573,9 @@ int KYTY_SYSV_ABI KernelClose(int d) {
 
 	file->opened = false;
 
-	LOGF("\tClose: %s\n", Common::PathToString(file->real_name).c_str());
+	if (ShouldLogIoChunk()) {
+		LOGF("\tClose: %s\n", Common::PathToString(file->real_name).c_str());
+	}
 
 	g_files->DeleteDescriptor(d);
 
@@ -636,7 +644,9 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 		return KERNEL_ERROR_EIO;
 	}
 
-	LOGF("\tRead %u bytes from: %s\n", bytes_read, Common::PathToString(file->real_name).c_str());
+	if (ShouldLogIoChunk()) {
+		LOGF("\tRead %u bytes from: %s\n", bytes_read, Common::PathToString(file->real_name).c_str());
+	}
 
 	return bytes_read;
 }
@@ -701,7 +711,9 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 		return KERNEL_ERROR_EIO;
 	}
 
-	LOGF("\tWrite %u bytes to: %s\n", bytes_written, Common::PathToString(file->real_name).c_str());
+	if (ShouldLogIoChunk()) {
+		LOGF("\tWrite %u bytes to: %s\n", bytes_written, Common::PathToString(file->real_name).c_str());
+	}
 
 	return bytes_written;
 }
@@ -763,8 +775,10 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		return KERNEL_ERROR_EIO;
 	}
 
-	LOGF("\tRead %u bytes (pos = %" PRId64 ") from: %s\n", bytes_read, offset,
-	     Common::PathToString(file->real_name).c_str());
+	if (ShouldLogIoChunk()) {
+		LOGF("\tRead %u bytes (pos = %" PRId64 ") from: %s\n", bytes_read, offset,
+		     Common::PathToString(file->real_name).c_str());
+	}
 
 	return bytes_read;
 }
@@ -1046,8 +1060,10 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 		EXIT_IF(file->f.Tell() != position);
 	}
 
-	LOGF("\tLseek (pos = %" PRIu64 ") to: %s\n", position,
-	     Common::PathToString(file->real_name).c_str());
+	if (ShouldLogIoChunk()) {
+		LOGF("\tLseek (pos = %" PRIu64 ") to: %s\n", position,
+		     Common::PathToString(file->real_name).c_str());
+	}
 
 	return static_cast<int64_t>(position);
 }

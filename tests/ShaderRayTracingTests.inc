@@ -83,5 +83,9 @@ void TestRayTracingDispatchDetection() {
     const auto compiled = RecompileForTest(ordinary_code, options);
     Check(!compiled.spirv.empty(), "ordinary shader did not compile");
     CheckSpirvBinaryValidates(compiled.spirv);
+
+    const auto bvh_result = ShaderRecompiler::TranslateProgram(bvh_code, options);
+    Check(bvh_result.skip_dispatch && bvh_result.program.blocks.empty() && bvh_result.cfg_dump.empty(),
+          "BVH shader did not skip dispatch for stage");
   }
 }

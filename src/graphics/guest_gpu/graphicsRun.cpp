@@ -380,12 +380,25 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
+
+	const auto vaddr = reinterpret_cast<uint64_t>(addr);
+
+	if (wait_op != 0) {
+		BufferFlushAndWait();
+	}
+
+	if (m_renderer.GetBufferCache().IsRegionGpuModified(vaddr, sizeof(T))) {
+		m_renderer.GetBufferCache().ReadMemory(vaddr, sizeof(T), false);
+	}
+
 	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+		BufferFlush();
+
 		static std::atomic<uint32_t> wait_reg_logs {0};
 		const auto log_id = wait_reg_logs.fetch_add(1, std::memory_order_relaxed);
 		// Soft-stall after Flip often lands here after the first 64 logs; keep
 		// emitting under graphics-debug-dump and periodically otherwise.
-		if (GraphicsRunDebugDumpEnabled() || log_id < 64 || (log_id % 256u) == 0u) {
+		if (GraphicsRunDebugDumpEnabled() || log_id < 16 || (log_id % 1024u) == 0u) {
 			if constexpr (sizeof(T) == sizeof(uint32_t)) {
 				LOGF("CommandProcessor::WaitRegMem32 suspend addr=0x%016" PRIx64
 				     " value=0x%08" PRIx32 " ref=0x%08" PRIx32 " mask=0x%08" PRIx32
@@ -562,7 +575,7 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 1000);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;

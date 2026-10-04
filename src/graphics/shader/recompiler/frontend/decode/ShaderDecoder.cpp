@@ -389,6 +389,10 @@ Program DecodeFrontProgram(std::span<const uint32_t> front) {
 		auto& inst = result.instructions.emplace_back();
 		DecodeInstruction(front, front_words, inst);
 		front_words += inst.word_count;
+		if (inst.family == Family::MIMG && (inst.opcode_id == 0xe6u || inst.opcode_id == 0xe7u)) {
+			result.has_bvh = true;
+			return result;
+		}
 		if (inst.opcode == Opcode::S_SETPC_B64) {
 			EXIT_NOT_IMPLEMENTED(inst.src0.kind != OperandKind::Sgpr || inst.src0.reg != 6u);
 			break;

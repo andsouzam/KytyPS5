@@ -504,6 +504,7 @@ Decoder::Program DecodeFusedProgram(std::span<const uint32_t> front, std::span<c
 		inst.branch_target += back_pc;
 		result.instructions.push_back(std::move(inst));
 	}
+	result.has_bvh = result.has_bvh || back_program.has_bvh;
 	result.code = joined_code;
 	return result;
 }
@@ -539,6 +540,9 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 		decoded = DecodeFusedProgram(code, options.back_code, joined_code);
 	} else if (options.stage == ShaderType::Local) {
 		decoded = Decoder::DecodeFrontProgram(code);
+		if (decoded.has_bvh) {
+			return {.skip_dispatch = true};
+		}
 		// The separately compiled hull half runs in the next Vulkan stage.
 		auto& handoff     = decoded.instructions.back();
 		handoff.opcode    = Decoder::Opcode::S_ENDPGM;
@@ -551,16 +555,15 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
 	     static_cast<uint64_t>(decoded.instructions.size()), phase_ms());
 
-	// Temporary workaround for games that compile ray-tracing shaders before
-	// the player can select a mode without ray tracing.
-	if (options.stage == ShaderType::Compute && decoded.has_bvh) {
-		static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-		if (!warned.test_and_set(std::memory_order_relaxed)) {
+	// Safely disable ray tracing execution across all shader stages.
+	if (decoded.has_bvh) {
+		static std::atomic<uint32_t> warned_count {0};
+		const auto count = warned_count.fetch_add(1, std::memory_order_relaxed);
+		if (count < 16 || (count & 0x3ff) == 0) {
 			const auto& bvh = decoded.instructions.back();
 			Log::WriteToConsoleAndLog(fmt::format(
-			    "Warning: ray tracing is not implemented; skipping compute dispatches containing "
-			    "BVH intersection instructions (shader=0x{:016x}, pc=0x{:08x}, opcode=0x{:02x}).\n",
-			    options.shader_hash, bvh.pc, bvh.opcode_id));
+			    "Warning: ray tracing disabled/unimplemented; skipping shader (stage={}, hash=0x{:016x}, pc=0x{:08x}, opcode=0x{:02x}).\n",
+			    StageName(options.stage), options.shader_hash, bvh.pc, bvh.opcode_id));
 		}
 		return {.skip_dispatch = true};
 	}

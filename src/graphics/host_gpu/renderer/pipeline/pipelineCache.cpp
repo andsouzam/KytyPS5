@@ -1354,29 +1354,31 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	vertex_info[tess_active ? 2u : 0u].linked_param_count = 0;
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
-		std::vector<uint32_t> active_inputs;
-		for (const auto& input: pixel_info.stage.program->info.inputs) {
-			if (input.kind == ShaderRecompiler::IR::StageInputKind::Parameter) {
-				active_inputs.push_back(input.location);
-			}
-		}
-		for (const auto input: active_inputs) {
-			const auto source = ShaderPixelParameterMappedLocation(pixel_info, input);
-			const auto location = ShaderPixelParameterLocation(pixel_info, active_inputs, input);
-			EXIT_IF(source >= 32u || location >= 32u);
-			bool duplicate = false;
-			for (uint32_t i = 0; i < vertex_info[tess_active ? 2u : 0u].linked_param_count; ++i) {
-				if (vertex_info[tess_active ? 2u : 0u].linked_param_sources[i] == source &&
-				    vertex_info[tess_active ? 2u : 0u].linked_param_locations[i] == location) {
-					duplicate = true;
-					break;
+		if (result.pixel && pixel_info.stage.program != nullptr) {
+			std::vector<uint32_t> active_inputs;
+			for (const auto& input: pixel_info.stage.program->info.inputs) {
+				if (input.kind == ShaderRecompiler::IR::StageInputKind::Parameter) {
+					active_inputs.push_back(input.location);
 				}
 			}
-			if (!duplicate) {
-				EXIT_IF(vertex_info[tess_active ? 2u : 0u].linked_param_count >= ShaderVertexInputInfo::PARAM_LINK_MAX);
-				const auto link = vertex_info[tess_active ? 2u : 0u].linked_param_count++;
-				vertex_info[tess_active ? 2u : 0u].linked_param_sources[link]   = source;
-				vertex_info[tess_active ? 2u : 0u].linked_param_locations[link] = location;
+			for (const auto input: active_inputs) {
+				const auto source = ShaderPixelParameterMappedLocation(pixel_info, input);
+				const auto location = ShaderPixelParameterLocation(pixel_info, active_inputs, input);
+				EXIT_IF(source >= 32u || location >= 32u);
+				bool duplicate = false;
+				for (uint32_t i = 0; i < vertex_info[tess_active ? 2u : 0u].linked_param_count; ++i) {
+					if (vertex_info[tess_active ? 2u : 0u].linked_param_sources[i] == source &&
+					    vertex_info[tess_active ? 2u : 0u].linked_param_locations[i] == location) {
+						duplicate = true;
+						break;
+					}
+				}
+				if (!duplicate) {
+					EXIT_IF(vertex_info[tess_active ? 2u : 0u].linked_param_count >= ShaderVertexInputInfo::PARAM_LINK_MAX);
+					const auto link = vertex_info[tess_active ? 2u : 0u].linked_param_count++;
+					vertex_info[tess_active ? 2u : 0u].linked_param_sources[link]   = source;
+					vertex_info[tess_active ? 2u : 0u].linked_param_locations[link] = location;
+				}
 			}
 		}
 	}
