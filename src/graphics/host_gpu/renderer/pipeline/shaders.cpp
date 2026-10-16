@@ -1295,11 +1295,12 @@ Common::UniqueFunction<vk::Pipeline> PrepareComputePipeline(GraphicContext&     
 				++elapsed;
 				g_shader_progress.active_elapsed_s.store(elapsed, std::memory_order_relaxed);
 				if (elapsed >= 3 && elapsed % 3 == 0) {
-					const uint32_t total = g_shader_progress.total_count.load(std::memory_order_relaxed);
-					constexpr uint32_t Estimated = 1476;
-					const float pct = std::clamp((total * 100.0f) / static_cast<float>(Estimated), 0.0f, 100.0f);
-					std::printf("[Compilando CS %016llx] %u s decorridos | Progresso: %u/%u (%.1f%%) | Driver ativo\n",
-					            static_cast<unsigned long long>(shader_hash), elapsed, total, Estimated, pct);
+					const uint32_t base = g_shader_progress.base_shader_count.load(std::memory_order_relaxed);
+					const uint32_t pipes = g_shader_progress.total_pipelines.load(std::memory_order_relaxed);
+					constexpr uint32_t TotalBase = 1476;
+					const float pct = std::clamp((base * 100.0f) / static_cast<float>(TotalBase), 0.0f, 100.0f);
+					std::printf("[Compilando CS %016llx] %u s decorridos | Shaders: %u/%u (%.1f%%) | Pipelines: %u | Driver ativo\n",
+					            static_cast<unsigned long long>(shader_hash), elapsed, base, TotalBase, pct, pipes);
 					std::fflush(stdout);
 				}
 			}

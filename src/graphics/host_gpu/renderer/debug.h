@@ -112,10 +112,11 @@ struct HudStats {
 inline HudStats g_hud;
 
 struct ShaderCompileProgress {
+	std::atomic<uint32_t> base_shader_count {0};
 	std::atomic<uint32_t> vs_count {0};
 	std::atomic<uint32_t> ps_count {0};
 	std::atomic<uint32_t> cs_count {0};
-	std::atomic<uint32_t> total_count {0};
+	std::atomic<uint32_t> total_pipelines {0};
 	std::atomic<uint32_t> active_compiles {0};
 	std::atomic<uint64_t> active_hash {0};
 	std::atomic<uint32_t> active_elapsed_s {0};

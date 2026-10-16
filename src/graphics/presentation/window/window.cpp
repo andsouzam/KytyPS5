@@ -770,16 +770,17 @@ void WindowContext::Run() {
 			last_compile_title_update = now_s;
 			const uint32_t active = g_shader_progress.active_compiles.load(std::memory_order_relaxed);
 			if (active > 0) {
-				const uint32_t total = g_shader_progress.total_count.load(std::memory_order_relaxed);
+				const uint32_t base = g_shader_progress.base_shader_count.load(std::memory_order_relaxed);
+				const uint32_t pipes = g_shader_progress.total_pipelines.load(std::memory_order_relaxed);
 				const uint32_t elapsed = g_shader_progress.active_elapsed_s.load(std::memory_order_relaxed);
 				const uint64_t hash = g_shader_progress.active_hash.load(std::memory_order_relaxed);
-				constexpr uint32_t EstimatedGameShaders = 1476;
-				const float pct = std::clamp((total * 100.0f) / static_cast<float>(EstimatedGameShaders), 0.0f, 100.0f);
+				constexpr uint32_t TotalBaseShaders = 1476;
+				const float pct = std::clamp((base * 100.0f) / static_cast<float>(TotalBaseShaders), 0.0f, 100.0f);
 				static char title_buf[128];
 				static bool has_title = Loader::SystemContentParamSfoGetString("TITLE", title_buf, sizeof(title_buf));
 				auto title_text = fmt::format(
-				    "[Compilando Shaders: {}/{} ({:.1f}%) | CS {:016x} ({}s)] {} [KytyPS5]",
-				    total, EstimatedGameShaders, pct, hash, elapsed, (has_title ? title_buf : "Ghost of Yotei"));
+				    "[Compilando Shaders: {}/{} ({:.1f}%) | Pipelines: {} | CS {:016x} ({}s)] {} [KytyPS5]",
+				    base, TotalBaseShaders, pct, pipes, hash, elapsed, (has_title ? title_buf : "Ghost of Yotei"));
 				SDL_SetWindowTitle(window, title_text.c_str());
 			}
 		}
@@ -1001,12 +1002,13 @@ void WindowContext::UpdateTitle(bool new_frame) {
 #endif
 
 	const auto* device_name = graphic_ctx.GetPhysicalDeviceProperties().deviceName.data();
-	const uint32_t total_sh = g_shader_progress.total_count.load(std::memory_order_relaxed);
-	constexpr uint32_t EstimatedShaders = 1476;
-	const float shader_pct = std::clamp((total_sh * 100.0f) / static_cast<float>(EstimatedShaders), 0.0f, 100.0f);
+	const uint32_t base_sh = g_shader_progress.base_shader_count.load(std::memory_order_relaxed);
+	const uint32_t pipes_sh = g_shader_progress.total_pipelines.load(std::memory_order_relaxed);
+	constexpr uint32_t TotalBaseShaders = 1476;
+	const float shader_pct = std::clamp((base_sh * 100.0f) / static_cast<float>(TotalBaseShaders), 0.0f, 100.0f);
 	auto        text        = fmt::format(
-	    "[Shaders: {}/{} ({:.1f}%)] [{} | {}] {}{}{}{}[{}] [{}], frame: {}, game fps: {:.1f}",
-	    total_sh, EstimatedShaders, shader_pct,
+	    "[Shaders: {}/{} ({:.1f}%) | Pipelines: {}] [{} | {}] {}{}{}{}[{}] [{}], frame: {}, game fps: {:.1f}",
+	    base_sh, TotalBaseShaders, shader_pct, pipes_sh,
 	    KYTY_BUILD_LABEL, build_type, (has_title ? title : ""), (has_title ? ", " : ""),
 	    (has_title_id ? title_id : ""), (has_title_id ? " " : ""), device_name, processor_name,
 	    frame_statistics.TotalFrames(), frame_statistics.FrameRate());

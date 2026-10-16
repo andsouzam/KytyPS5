@@ -1530,15 +1530,16 @@ struct SystemOverlay::Impl {
 		if (hud_memory_mb != 0) {
 			ImGui::Text("VRAM: %u MB", hud_memory_mb);
 		}
+		const uint32_t base_s = g_shader_progress.base_shader_count.load(std::memory_order_relaxed);
 		const uint32_t vs = g_shader_progress.vs_count.load(std::memory_order_relaxed);
 		const uint32_t ps = g_shader_progress.ps_count.load(std::memory_order_relaxed);
 		const uint32_t cs = g_shader_progress.cs_count.load(std::memory_order_relaxed);
-		const uint32_t total_s = g_shader_progress.total_count.load(std::memory_order_relaxed);
-		constexpr uint32_t EstimatedHudShaders = 1476;
-		const float sh_pct = std::clamp((total_s * 100.0f) / static_cast<float>(EstimatedHudShaders), 0.0f, 100.0f);
+		const uint32_t total_pipes = g_shader_progress.total_pipelines.load(std::memory_order_relaxed);
+		constexpr uint32_t TotalBaseHud = 1476;
+		const float sh_pct = std::clamp((base_s * 100.0f) / static_cast<float>(TotalBaseHud), 0.0f, 100.0f);
 		ImGui::Separator();
-		ImGui::Text("Shaders: %u/%u (%.1f%%)", total_s, EstimatedHudShaders, sh_pct);
-		ImGui::Text("Estagios: VS %u | PS %u | CS %u", vs, ps, cs);
+		ImGui::Text("Shaders Base: %u/%u (%.1f%%)", base_s, TotalBaseHud, sh_pct);
+		ImGui::Text("Pipelines: %u (VS %u | PS %u | CS %u)", total_pipes, vs, ps, cs);
 		const uint32_t active_c = g_shader_progress.active_compiles.load(std::memory_order_relaxed);
 		if (active_c > 0) {
 			const uint64_t a_hash = g_shader_progress.active_hash.load(std::memory_order_relaxed);

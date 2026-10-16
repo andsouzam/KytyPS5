@@ -1232,21 +1232,23 @@ struct PipelineCache::ProgramCache {
 		for (const auto& [key, program_source]: programs) {
 			counts[static_cast<size_t>(key.stage)] += program_source.permutations.size();
 		}
+		const uint32_t base_shaders = static_cast<uint32_t>(programs.size());
 		const uint32_t vs = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Vertex)]);
 		const uint32_t ps = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Pixel)]);
 		const uint32_t cs = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Compute)]);
 		const uint32_t total = vs + ps + cs;
-		constexpr uint32_t EstimatedGameShaders = 1476;
-		const float pct = std::clamp((total * 100.0f) / static_cast<float>(EstimatedGameShaders), 0.0f, 100.0f);
+		constexpr uint32_t TotalBaseShaders = 1476;
+		const float pct = std::clamp((base_shaders * 100.0f) / static_cast<float>(TotalBaseShaders), 0.0f, 100.0f);
 
+		g_shader_progress.base_shader_count.store(base_shaders, std::memory_order_relaxed);
 		g_shader_progress.vs_count.store(vs, std::memory_order_relaxed);
 		g_shader_progress.ps_count.store(ps, std::memory_order_relaxed);
 		g_shader_progress.cs_count.store(cs, std::memory_order_relaxed);
-		g_shader_progress.total_count.store(total, std::memory_order_relaxed);
+		g_shader_progress.total_pipelines.store(total, std::memory_order_relaxed);
 
 		// Guest geometry shaders are compiled through the host mesh stage.
-		std::printf("[Shaders: %u/%u (%.1f%%)] VS %u | PS %u | CS %u | GS %zu | LS %zu | HS %zu | TES %zu\n",
-		            total, EstimatedGameShaders, pct, vs, ps, cs,
+		std::printf("[Shaders: %u/%u (%.1f%%) | Pipelines: %u] VS %u | PS %u | CS %u | GS %zu | LS %zu | HS %zu | TES %zu\n",
+		            base_shaders, TotalBaseShaders, pct, total, vs, ps, cs,
 		            counts[static_cast<size_t>(ShaderType::Mesh)],
 		            counts[static_cast<size_t>(ShaderType::Local)],
 		            counts[static_cast<size_t>(ShaderType::TessellationControl)],

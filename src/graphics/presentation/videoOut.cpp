@@ -1907,9 +1907,15 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	int32_t attribute3 = 0;
 	Loader::SystemContentParamSfoGetInt("ATTRIBUTE3", &attribute3);
 	ctx->mutex.Lock();
-	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
-	status->resolution =
-	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
+	const char* force_1080p_env = KYTY_GETENV("KYTY_FORCE_1080P");
+	const bool force_1080p = (force_1080p_env != nullptr && std::strcmp(force_1080p_env, "1") == 0) ||
+	                         (ctx->width <= 1920 && ctx->height <= 1080);
+	if (force_1080p) {
+		status->resolution = 1u; // SCE_VIDEO_OUT_RESOLUTION_1080P (1920x1080)
+	} else {
+		status->resolution =
+		    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
+	}
 	status->dynamicRange = 1;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119
