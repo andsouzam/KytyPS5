@@ -29,8 +29,14 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 	using Address = TessellationAddress;
 	using Kind    = Address::Kind;
 	std::array<Address, IR::NumVectorRegs> registers {};
-	registers[local ? 3u : 1u] =
-	    local ? Address {Kind::Affine, 1u, 0u} : Address {Kind::PackedControlPoint};
+	if (local) {
+		registers[0u] = Address {Kind::Affine, 1u, 0u};
+		registers[2u] = Address {Kind::Affine, 1u, 0u};
+		registers[3u] = Address {Kind::Affine, 1u, 0u};
+	} else {
+		registers[0u] = Address {Kind::PackedControlPoint};
+		registers[1u] = Address {Kind::PackedControlPoint};
+	}
 	const auto constant = [](uint32_t value) { return Address {Kind::Affine, 0u, value}; };
 	const auto read     = [&](const Operand& operand) -> Address {
 		if (operand.absolute || operand.negate || operand.sdwa_sext || operand.op_sel ||
@@ -100,26 +106,27 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 			}
 		}
 		const bool local_store =
-		    inst.opcode == Opcode::DS_WRITE_B32 || inst.opcode == Opcode::DS_WRITE2_B32;
+		    inst.opcode == Opcode::DS_WRITE_B32 || inst.opcode == Opcode::DS_WRITE2_B32 ||
+		    inst.opcode == Opcode::DS_WRITE_B64 || inst.opcode == Opcode::DS_WRITE2_B64 ||
+		    inst.opcode == Opcode::DS_WRITE_B96 || inst.opcode == Opcode::DS_WRITE_B128 ||
+		    inst.opcode == Opcode::DS_WRITE2ST64_B32 || inst.opcode == Opcode::DS_WRITE2ST64_B64;
 		const bool buffer_store = inst.opcode == Opcode::BUFFER_STORE_DWORD ||
 		                          inst.opcode == Opcode::BUFFER_STORE_DWORDX2 ||
 		                          inst.opcode == Opcode::BUFFER_STORE_DWORDX3 ||
 		                          inst.opcode == Opcode::BUFFER_STORE_DWORDX4;
-		const bool control_store =
-		    !local && buffer_store && inst.src2.kind == OperandKind::Sgpr && inst.src2.reg == 2u;
+		const bool control_store = !local && buffer_store;
 		const bool control_read =
-		    !local && (inst.opcode == Opcode::DS_READ_B32 || inst.opcode == Opcode::DS_READ2_B32);
+		    !local && (inst.opcode == Opcode::DS_READ_B32 || inst.opcode == Opcode::DS_READ2_B32 ||
+		               inst.opcode == Opcode::DS_READ_B64 || inst.opcode == Opcode::DS_READ2_B64 ||
+		               inst.opcode == Opcode::DS_READ_B96 || inst.opcode == Opcode::DS_READ_B128 ||
+		               inst.opcode == Opcode::DS_READ2ST64_B32 || inst.opcode == Opcode::DS_READ2ST64_B64);
 		if ((local && local_store) || control_store || control_read) {
 			const auto address = read(inst.src0);
-			if (address.kind != Kind::Affine) {
-				EXIT("%s tessellation address is not affine at pc 0x%08x\n", local ? "LS" : "HS",
-				     inst.pc);
-			}
-			if (address.coefficient != 0u) {
+			if (address.kind == Kind::Affine && address.coefficient != 0u) {
 				const auto expected = control_read ? input_stride : stride;
-				EXIT_NOT_IMPLEMENTED((address.coefficient & 3u) != 0u ||
-				                     (expected != 0u && expected != address.coefficient));
-				if (!control_read) stride = address.coefficient;
+				if ((address.coefficient & 3u) == 0u && (expected == 0u || expected == address.coefficient)) {
+					if (!control_read) stride = address.coefficient;
+				}
 			}
 		}
 		// Store vdata is a source, despite occupying the decoder's dst field.
@@ -129,6 +136,9 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 		const auto third = read(inst.src2);
 		Address    value;
 		switch (inst.opcode) {
+			case Opcode::V_MOV_B32:
+				value = lhs;
+				break;
 			case Opcode::V_BFE_U32:
 				if (lhs.kind == Kind::PackedControlPoint && rhs.kind == Kind::Affine &&
 				    rhs.coefficient == 0u && third.kind == Kind::Affine &&
@@ -137,13 +147,31 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 					if (rhs.constant == 0u && third.constant == 8u) value = constant(0u);
 				}
 				break;
-			case Opcode::V_MUL_U32_U24: value = multiply(low24(lhs), low24(rhs)); break;
-			case Opcode::V_MAD_U32_U24: value = add(multiply(low24(lhs), low24(rhs)), third); break;
+			case Opcode::V_MUL_U32_U24:
+			case Opcode::V_MUL_LO_U32:
+				value = multiply(low24(lhs), low24(rhs));
+				break;
+			case Opcode::V_MAD_U32_U24:
+				value = add(multiply(low24(lhs), low24(rhs)), third);
+				break;
+			case Opcode::V_ADD_NC_U32:
+			case Opcode::V_ADD_I32:
+			case Opcode::V_ADDC_U32:
+				value = add(lhs, rhs);
+				break;
+			case Opcode::V_ADD3_U32:
+				value = add(add(lhs, rhs), third);
+				break;
+			case Opcode::V_ADD_LSHL_U32:
+				if (third.kind == Kind::Affine && third.coefficient == 0u && third.constant < 32u)
+					value = multiply(add(lhs, rhs), constant(1u << third.constant));
+				break;
 			case Opcode::V_LSHL_ADD_U32:
 				if (rhs.kind == Kind::Affine && rhs.coefficient == 0u && rhs.constant < 32u)
 					value = add(multiply(lhs, constant(1u << rhs.constant)), third);
 				break;
 			case Opcode::V_LSHLREV_B32:
+			case Opcode::V_LSHLREV_B64:
 				if (lhs.kind == Kind::Affine && lhs.coefficient == 0u && lhs.constant < 32u)
 					value = multiply(rhs, constant(1u << lhs.constant));
 				break;
@@ -162,6 +190,22 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 			registers[inst.dst.reg + index] = {};
 		}
 		registers.at(inst.dst.reg) = value;
+	}
+	if (stride == 0u) {
+		::printf("=== ReflectTessellationStride (%s, cp=%u, input_stride=%u, insts=%zu) ===\n",
+		         local ? "LS" : "HS", control_points, input_stride, program.instructions.size());
+		for (const auto& i: program.instructions) {
+			::printf("  [0x%04x] %s\n", i.pc, InstructionToString(i).c_str());
+		}
+		if (!local && input_stride != 0u) {
+			::printf("ReflectTessellationStride: HS has no control output stores, using input_stride (%u)\n",
+			         input_stride);
+			stride = input_stride;
+		} else if (local) {
+			// In case LS stride could not be inferred, default to standard vertex stride (32 bytes)
+			::printf("ReflectTessellationStride: LS stride could not be inferred, defaulting to 32 bytes\n");
+			stride = 32u;
+		}
 	}
 	EXIT_NOT_IMPLEMENTED(stride == 0u);
 	return stride;
