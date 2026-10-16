@@ -1968,30 +1968,9 @@ void PipelineCache::ReplayPrecompiled(std::vector<ShaderPrecompile::PermutationR
 			(void)insert(*index);
 		}
 	}
-	// Wait for all replayed compute pipelines to finish compiling before the game starts rendering
-	if (queued > 0) {
-		std::vector<std::shared_future<vk::Pipeline>> pending_futures;
-		{
-			Common::LockGuard lock(m_mutex);
-			for (const auto& [id, build]: m_compute_builds) {
-				if (build.origin == ComputeOrigin::Replay && build.result.valid()) {
-					pending_futures.push_back(build.result);
-				}
-			}
-		}
-		PipelineCacheLog("Shader precompile: waiting for {} compute pipelines to complete...",
-		                 pending_futures.size());
-		size_t done_count = 0;
-		for (auto& fut: pending_futures) {
-			fut.wait();
-			done_count++;
-			if (done_count % 25 == 0 || done_count == pending_futures.size()) {
-				PipelineCacheLog("Shader precompile: compiled {}/{} compute pipelines",
-				                 done_count, pending_futures.size());
-			}
-		}
-		(void)WriteDriverCache();
-	}
+	// Allow background compilation of replayed compute pipelines without stalling the initial frames
+	PipelineCacheLog("Shader precompile: replayed {} permutations ({} compute queued in background)",
+	                 compiled, queued);
 	// KYTY_DEBUG_REPLAY_DETERMINISM=1: translates every record twice more, the two copies on
 	// different threads at the same time, and names each shader whose SPIR-V differs between
 	// them: the translator must give one result for one input on any thread.
