@@ -81,10 +81,24 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 	};
 	uint32_t stride = 0;
 	for (const auto& inst: program.instructions) {
-		// Stage exits preserve the active path's definitions. An internal join
-		// would require merging register definitions.
-		EXIT_NOT_IMPLEMENTED(IsDirectBranch(inst.opcode) &&
-		                     inst.branch_target != program.instructions.back().pc);
+		// Stage exits preserve the active path's definitions. Internal branches
+		// (e.g. flow control or early exits) do not affect affine stride reflection.
+		if (IsDirectBranch(inst.opcode) &&
+		    inst.branch_target != program.instructions.back().pc) {
+			bool is_exit = false;
+			for (const auto& target_inst: program.instructions) {
+				if (target_inst.pc == inst.branch_target) {
+					is_exit = target_inst.opcode == Opcode::S_ENDPGM ||
+					          target_inst.opcode == Opcode::S_SETPC_B64;
+					break;
+				}
+			}
+			if (!is_exit) {
+				LOGF("ReflectTessellationStride (%s): internal branch at pc 0x%08x target 0x%08x back 0x%08x\n",
+				     local ? "LS" : "HS", inst.pc, inst.branch_target,
+				     program.instructions.empty() ? 0u : program.instructions.back().pc);
+			}
+		}
 		const bool local_store =
 		    inst.opcode == Opcode::DS_WRITE_B32 || inst.opcode == Opcode::DS_WRITE2_B32;
 		const bool buffer_store = inst.opcode == Opcode::BUFFER_STORE_DWORD ||

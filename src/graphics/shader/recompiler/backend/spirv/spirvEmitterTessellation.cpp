@@ -124,16 +124,29 @@ void DefineTessellationInterfaces(EmitterState& state) {
 
 void DefineTessellationExecutionModes(EmitterState& state) {
 	const auto& tess = state.input_info.vertex->tess;
-	EXIT_NOT_IMPLEMENTED(tess.domain != 1u || tess.partitioning != 2u ||
-	                     tess.output_topology != 2u);
 	state.builder.RequireCapability(spv::CapabilityTessellation);
 	if (state.program.stage == ShaderType::TessellationControl) {
 		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeOutputVertices,
 		                               tess.output_control_points);
 	} else {
-		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeTriangles);
-		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeSpacingFractionalOdd);
-		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeVertexOrderCw);
+		switch (tess.domain) {
+			case 0u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeIsolines); break;
+			case 1u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeTriangles); break;
+			case 2u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeQuads); break;
+			default: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeTriangles); break;
+		}
+		switch (tess.partitioning) {
+			case 0u:
+			case 1u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeSpacingEqual); break;
+			case 2u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeSpacingFractionalOdd); break;
+			case 3u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeSpacingFractionalEven); break;
+			default: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeSpacingFractionalOdd); break;
+		}
+		switch (tess.output_topology) {
+			case 2u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeVertexOrderCw); break;
+			case 3u: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeVertexOrderCcw); break;
+			default: state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeVertexOrderCw); break;
+		}
 	}
 }
 
