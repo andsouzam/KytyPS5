@@ -272,7 +272,7 @@ uint32_t PipelineCompileThreads() {
 		return g_config->pipeline_compile_threads;
 	}
 	const auto hardware = std::thread::hardware_concurrency();
-	return hardware > 4 ? hardware - 2 : 2;
+	return hardware != 0 ? std::clamp(hardware * 2u, 8u, 32u) : 8u;
 }
 
 uint32_t PipelineCompileReplayThreads() {

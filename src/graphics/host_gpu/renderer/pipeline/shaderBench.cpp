@@ -1024,10 +1024,21 @@ int Run(int argc, char* argv[]) {
 
 	std::vector<Result> results(selected.size());
 	std::atomic_size_t  next {0};
+	std::atomic_size_t  done_count {0};
 	const auto          work = [&] {
         for (size_t n = next.fetch_add(1); n < selected.size(); n = next.fetch_add(1)) {
             results[n].record = selected[n];
             Translate(o, records[selected[n]], max_lds, results[n]);
+            if (!results[n].skipped && !o.precompile_cache.empty() && have_device &&
+                records[selected[n]].stage == ShaderType::Compute) {
+                (void)PrecompileCompute(device, target_cache, results[n].spirv, results[n].wave_size, results[n]);
+            }
+            const auto completed = done_count.fetch_add(1) + 1;
+            if (completed % 25 == 0 || completed == selected.size()) {
+                std::printf("[Precompiler] Progresso paralelo: %zu/%zu shaders concluidos (%.1f%%)...\n",
+                            completed, selected.size(), (completed * 100.0) / selected.size());
+                std::fflush(stdout);
+            }
         }
 	};
 	{
@@ -1047,13 +1058,10 @@ int Run(int argc, char* argv[]) {
 			            static_cast<unsigned long long>(record.hash), StageName(record.stage));
 			continue;
 		}
-		if (!o.precompile_cache.empty() && have_device && record.stage == ShaderType::Compute) {
-			(void)PrecompileCompute(device, target_cache, r.spirv, r.wave_size, r);
-			total_driver += r.driver_s;
-		} else if (o.time && record.stage == ShaderType::Compute) {
+		if (o.time && o.precompile_cache.empty() && record.stage == ShaderType::Compute) {
 			(void)TimeCompute(device, r.spirv, r.wave_size, r);
-			total_driver += r.driver_s;
 		}
+		if (r.driver_s >= 0) total_driver += r.driver_s;
 		total_translate += r.translate_ms + r.emit_ms;
 		if (!o.out_dir.empty()) {
 			const auto    path = o.out_dir / fmt::format("spv_{:016x}_r{}.spv", record.hash, r.record);

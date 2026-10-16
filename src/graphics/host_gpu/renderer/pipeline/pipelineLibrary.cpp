@@ -21,7 +21,7 @@ namespace {
 
 uint32_t GetCompileThreadCount() {
 	const auto hardware = std::thread::hardware_concurrency();
-	return hardware != 0 ? std::clamp(hardware, 4u, 16u) : 6u;
+	return hardware != 0 ? std::clamp(hardware * 2u, 8u, 32u) : 8u;
 }
 
 void LowerThreadPriority() {
