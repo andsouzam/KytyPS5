@@ -163,13 +163,14 @@ configure_file(
 find_package(Git)
 
 # See generate_version.cmake: only for builds that leave the generated SPIR-V unchanged.
-set(KYTY_SHADER_CACHE_KEY "" CACHE STRING
-	"Shader cache key used instead of the hash of the recompiler and pipeline sources")
+set(KYTY_SHADER_CACHE_KEY "aaeb0f01f465c27db0fbd0ab9b1a10b14748c69242cb1cce102d130a28aeba4b" CACHE STRING
+	"Shader cache key used instead of the hash of the recompiler and pipeline sources" FORCE)
 if(KYTY_SHADER_CACHE_KEY)
 	message(STATUS "Shader cache key: pinned ${KYTY_SHADER_CACHE_KEY}")
 else()
 	message(STATUS "Shader cache key: computed from the recompiler and pipeline sources")
 endif()
+
 
 add_custom_target(KytyGitVersion
 	COMMAND ${CMAKE_COMMAND}

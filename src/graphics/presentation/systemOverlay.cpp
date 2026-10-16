@@ -1530,7 +1530,24 @@ struct SystemOverlay::Impl {
 		if (hud_memory_mb != 0) {
 			ImGui::Text("VRAM: %u MB", hud_memory_mb);
 		}
+		const uint32_t vs = g_shader_progress.vs_count.load(std::memory_order_relaxed);
+		const uint32_t ps = g_shader_progress.ps_count.load(std::memory_order_relaxed);
+		const uint32_t cs = g_shader_progress.cs_count.load(std::memory_order_relaxed);
+		const uint32_t total_s = g_shader_progress.total_count.load(std::memory_order_relaxed);
+		constexpr uint32_t EstimatedHudShaders = 1476;
+		const float sh_pct = std::clamp((total_s * 100.0f) / static_cast<float>(EstimatedHudShaders), 0.0f, 100.0f);
+		ImGui::Separator();
+		ImGui::Text("Shaders: %u/%u (%.1f%%)", total_s, EstimatedHudShaders, sh_pct);
+		ImGui::Text("Estagios: VS %u | PS %u | CS %u", vs, ps, cs);
+		const uint32_t active_c = g_shader_progress.active_compiles.load(std::memory_order_relaxed);
+		if (active_c > 0) {
+			const uint64_t a_hash = g_shader_progress.active_hash.load(std::memory_order_relaxed);
+			const uint32_t a_elapsed = g_shader_progress.active_elapsed_s.load(std::memory_order_relaxed);
+			ImGui::TextColored({1.0f, 0.8f, 0.2f, 1.0f}, "Compilando: %016llx (%us)",
+			                   static_cast<unsigned long long>(a_hash), a_elapsed);
+		}
 		ImGui::End();
+
 	}
 
 	bool PrepareFrame(vk::Extent2D frame_extent, vk::Format format, uint32_t image_count) {

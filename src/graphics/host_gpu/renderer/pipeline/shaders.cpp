@@ -1283,20 +1283,35 @@ Common::UniqueFunction<vk::Pipeline> PrepareComputePipeline(GraphicContext&     
 		info.basePipelineIndex = -1;
 		vk::Pipeline pipeline  = nullptr;
 		const auto   started   = std::chrono::steady_clock::now();
-		// A compile still running after 10 s names its shader while the game stalls on it.
+		g_shader_progress.active_compiles.fetch_add(1, std::memory_order_relaxed);
+		g_shader_progress.active_hash.store(shader_hash, std::memory_order_relaxed);
+		g_shader_progress.active_elapsed_s.store(0, std::memory_order_relaxed);
+
+		// Watch compilation progress and report live telemetry
 		std::promise<void> compiled;
 		auto watch = std::async(std::launch::async, [finished = compiled.get_future(), shader_hash] {
-			if (finished.wait_for(std::chrono::seconds(10)) == std::future_status::timeout) {
-				std::printf("PipelineCache: compute pipeline %016llx still compiling in the driver\n",
-				            static_cast<unsigned long long>(shader_hash));
-				std::fflush(stdout);
+			uint32_t elapsed = 0;
+			while (finished.wait_for(std::chrono::seconds(1)) == std::future_status::timeout) {
+				++elapsed;
+				g_shader_progress.active_elapsed_s.store(elapsed, std::memory_order_relaxed);
+				if (elapsed >= 3 && elapsed % 3 == 0) {
+					const uint32_t total = g_shader_progress.total_count.load(std::memory_order_relaxed);
+					constexpr uint32_t Estimated = 1476;
+					const float pct = std::clamp((total * 100.0f) / static_cast<float>(Estimated), 0.0f, 100.0f);
+					std::printf("[Compilando CS %016llx] %u s decorridos | Progresso: %u/%u (%.1f%%) | Driver ativo\n",
+					            static_cast<unsigned long long>(shader_hash), elapsed, total, Estimated, pct);
+					std::fflush(stdout);
+				}
 			}
 		});
 		const auto created =
 		    driver_cache.CreateCompute(graphics.device, info, &pipeline);
 		compiled.set_value();
 		watch.wait();
+		g_shader_progress.active_compiles.fetch_sub(1, std::memory_order_relaxed);
+		g_shader_progress.active_elapsed_s.store(0, std::memory_order_relaxed);
 		if (created != vk::Result::eSuccess) {
+
 			LOGF("PipelineCache: compute pipeline creation failed\n");
 			return vk::Pipeline {};
 		}

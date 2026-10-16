@@ -407,8 +407,14 @@ std::vector<PermutationRecord> Journal::Open(const std::filesystem::path& path,
 		if (!path.parent_path().empty())
 			std::filesystem::create_directories(path.parent_path(), ec);
 		if (ec) return records;
+		if (std::filesystem::exists(path) && std::filesystem::file_size(path, ec) > 0) {
+			std::error_code backup_ec;
+			std::filesystem::copy_file(path, path.string() + ".bak",
+			                           std::filesystem::copy_options::overwrite_existing, backup_ec);
+		}
 		m_out.open(path, std::ios::binary | std::ios::trunc);
 		if (!m_out || !Write(m_out, header.bytes)) {
+
 			Close();
 			return records;
 		}

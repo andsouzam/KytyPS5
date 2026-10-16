@@ -111,6 +111,18 @@ struct HudStats {
 };
 inline HudStats g_hud;
 
+struct ShaderCompileProgress {
+	std::atomic<uint32_t> vs_count {0};
+	std::atomic<uint32_t> ps_count {0};
+	std::atomic<uint32_t> cs_count {0};
+	std::atomic<uint32_t> total_count {0};
+	std::atomic<uint32_t> active_compiles {0};
+	std::atomic<uint64_t> active_hash {0};
+	std::atomic<uint32_t> active_elapsed_s {0};
+};
+inline ShaderCompileProgress g_shader_progress;
+
+
 // KYTY_DEBUG_BIND_STATS=1 (with KYTY_DEBUG_DRAW_PHASES): why a stage's image group was not kept,
 // and which draws only write depth, printed as "image-groups" and "depth-only" lines after each
 // draw-phases line. Render thread only.

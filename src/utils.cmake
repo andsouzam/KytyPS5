@@ -92,6 +92,7 @@ if(KYTY_CLANG_CL)
 	add_compile_options("$<$<CONFIG:RelWithDebInfo>:/DNDEBUG>")
 
 	set(KYTY_C_FLAGS "${KYTY_CPP_FLAGS}")
+	set(KYTY_CPP_FLAGS "${KYTY_CPP_FLAGS} /EHsc")
 	
 elseif(CLANG OR GCC)
 

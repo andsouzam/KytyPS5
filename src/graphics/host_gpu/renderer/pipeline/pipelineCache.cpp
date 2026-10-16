@@ -1232,16 +1232,28 @@ struct PipelineCache::ProgramCache {
 		for (const auto& [key, program_source]: programs) {
 			counts[static_cast<size_t>(key.stage)] += program_source.permutations.size();
 		}
+		const uint32_t vs = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Vertex)]);
+		const uint32_t ps = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Pixel)]);
+		const uint32_t cs = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Compute)]);
+		const uint32_t total = vs + ps + cs;
+		constexpr uint32_t EstimatedGameShaders = 1476;
+		const float pct = std::clamp((total * 100.0f) / static_cast<float>(EstimatedGameShaders), 0.0f, 100.0f);
+
+		g_shader_progress.vs_count.store(vs, std::memory_order_relaxed);
+		g_shader_progress.ps_count.store(ps, std::memory_order_relaxed);
+		g_shader_progress.cs_count.store(cs, std::memory_order_relaxed);
+		g_shader_progress.total_count.store(total, std::memory_order_relaxed);
+
 		// Guest geometry shaders are compiled through the host mesh stage.
-		std::printf("Shaders: VS %zu | PS %zu | CS %zu | GS %zu | LS %zu | HS %zu | TES %zu\n",
-		            counts[static_cast<size_t>(ShaderType::Vertex)],
-		            counts[static_cast<size_t>(ShaderType::Pixel)],
-		            counts[static_cast<size_t>(ShaderType::Compute)],
+		std::printf("[Shaders: %u/%u (%.1f%%)] VS %u | PS %u | CS %u | GS %zu | LS %zu | HS %zu | TES %zu\n",
+		            total, EstimatedGameShaders, pct, vs, ps, cs,
 		            counts[static_cast<size_t>(ShaderType::Mesh)],
 		            counts[static_cast<size_t>(ShaderType::Local)],
 		            counts[static_cast<size_t>(ShaderType::TessellationControl)],
 		            counts[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
+		std::fflush(stdout);
 		return permutation.handle;
+
 	}
 
 	// On the draw speculation thread: refreshes a known source's resources for a future draw

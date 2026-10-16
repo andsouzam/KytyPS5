@@ -187,11 +187,11 @@ DlssStatus DlssRgbMerge::Record(VkCommandBuffer command, VkImageView source,
         return {DlssStatusCode::InvalidState, 0, "RGB merge has not been initialized"};
     if (state.outstanding->load(std::memory_order_relaxed) >= MaximumDescriptorLeases)
         return {DlssStatusCode::Unsupported, 0, "RGB merge outstanding descriptor lease capacity exhausted"};
-    std::shared_ptr<State::PoolLease> lease;
-    try { lease = std::make_shared<State::PoolLease>(); }
-    catch (const std::bad_alloc&) {
+    auto lease = std::make_shared<State::PoolLease>();
+    if (!lease) {
         return {DlssStatusCode::NativeError, uint32_t(VK_ERROR_OUT_OF_HOST_MEMORY), "RGB merge lease allocation failed"};
     }
+
     lease->device = state.device; lease->destroy = state.vkDestroyDescriptorPool;
     lease->outstanding = state.outstanding;
     VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3};

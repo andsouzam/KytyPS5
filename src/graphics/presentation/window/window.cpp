@@ -755,6 +755,7 @@ void WindowContext::Run() {
 	loop.need_exit = false;
 	loop.paused.store(false, std::memory_order_release);
 
+	double last_compile_title_update = 0.0;
 	while (!loop.need_exit) {
 		if (loop.paused.load(std::memory_order_acquire)) {
 			if (!timer.IsPaused()) {
@@ -764,11 +765,31 @@ void WindowContext::Run() {
 			timer.Resume();
 		}
 
+		const double now_s = timer.GetTimeS();
+		if (now_s - last_compile_title_update >= 0.5) {
+			last_compile_title_update = now_s;
+			const uint32_t active = g_shader_progress.active_compiles.load(std::memory_order_relaxed);
+			if (active > 0) {
+				const uint32_t total = g_shader_progress.total_count.load(std::memory_order_relaxed);
+				const uint32_t elapsed = g_shader_progress.active_elapsed_s.load(std::memory_order_relaxed);
+				const uint64_t hash = g_shader_progress.active_hash.load(std::memory_order_relaxed);
+				constexpr uint32_t EstimatedGameShaders = 1476;
+				const float pct = std::clamp((total * 100.0f) / static_cast<float>(EstimatedGameShaders), 0.0f, 100.0f);
+				static char title_buf[128];
+				static bool has_title = Loader::SystemContentParamSfoGetString("TITLE", title_buf, sizeof(title_buf));
+				auto title_text = fmt::format(
+				    "[Compilando Shaders: {}/{} ({:.1f}%) | CS {:016x} ({}s)] {} [KytyPS5]",
+				    total, EstimatedGameShaders, pct, hash, elapsed, (has_title ? title_buf : "Ghost of Yotei"));
+				SDL_SetWindowTitle(window, title_text.c_str());
+			}
+		}
+
 		if (!HostInputWaitEvent(&loop.event)) {
 			continue;
 		}
-		ProcessEvent(timer.GetTimeS());
+		ProcessEvent(now_s);
 	}
+
 }
 
 static void WindowCreate(WindowContext& context) {
@@ -980,11 +1001,16 @@ void WindowContext::UpdateTitle(bool new_frame) {
 #endif
 
 	const auto* device_name = graphic_ctx.GetPhysicalDeviceProperties().deviceName.data();
+	const uint32_t total_sh = g_shader_progress.total_count.load(std::memory_order_relaxed);
+	constexpr uint32_t EstimatedShaders = 1476;
+	const float shader_pct = std::clamp((total_sh * 100.0f) / static_cast<float>(EstimatedShaders), 0.0f, 100.0f);
 	auto        text        = fmt::format(
-	    "[{} | {}] {}{}{}{}[{}] [{}], frame: {}, game fps: {:.1f}",
+	    "[Shaders: {}/{} ({:.1f}%)] [{} | {}] {}{}{}{}[{}] [{}], frame: {}, game fps: {:.1f}",
+	    total_sh, EstimatedShaders, shader_pct,
 	    KYTY_BUILD_LABEL, build_type, (has_title ? title : ""), (has_title ? ", " : ""),
 	    (has_title_id ? title_id : ""), (has_title_id ? " " : ""), device_name, processor_name,
 	    frame_statistics.TotalFrames(), frame_statistics.FrameRate());
+
     const auto* temporal_dlss = render_context ? render_context->GetTemporalDlss() : nullptr;
     const auto completed = temporal_dlss ? temporal_dlss->CompletedCount() : uint64_t{0};
     const auto previous = title_dlss_completed.exchange(completed, std::memory_order_relaxed);
