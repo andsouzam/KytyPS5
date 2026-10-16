@@ -870,7 +870,10 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 	// KYTY_PRESENT_WHEN_READY=1 (for variable-refresh displays): a finished frame is shown as soon
 	// as it is ready instead of at the next emulated vblank, but no sooner than one flip interval
 	// after the previous one. Vblank events keep their fixed rate.
-	static const bool when_ready = KYTY_GETENV("KYTY_PRESENT_WHEN_READY") != nullptr;
+	static const bool when_ready = [] {
+		const char* env = KYTY_GETENV("KYTY_PRESENT_WHEN_READY");
+		return env != nullptr && std::strcmp(env, "0") != 0 && std::strcmp(env, "false") != 0;
+	}();
 	uint64_t          last_flip  = 0;
 	auto flip_when_ready = [&](uint64_t now) {
 		if (m_presenter.IsGuestPaused() || !m_flip_queue.IsFlipReady()) {
