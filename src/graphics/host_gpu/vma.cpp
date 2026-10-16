@@ -495,6 +495,27 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
 		                   &alloc_info, &native_image, &image.allocation, nullptr));
 	}
+	if (result != vk::Result::eSuccess) {
+		// First retry: clear any retired/recycled images that are hoarding VRAM blocks
+		ClearRecycledImages(allocator);
+		result = static_cast<vk::Result>(
+		    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
+		                   &alloc_info, &native_image, &image.allocation, nullptr));
+	}
+	if (result != vk::Result::eSuccess) {
+		// Second retry: relax requiredFlags to preferredFlags, allowing host/shared system RAM fallback
+		// over PCIe when device VRAM is saturated, preventing fatal out-of-memory crashes!
+		VmaAllocationCreateInfo fallback_info {};
+		fallback_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		result = static_cast<vk::Result>(
+		    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
+		                   &fallback_info, &native_image, &image.allocation, nullptr));
+		if (result == vk::Result::eSuccess) {
+			LOGF("VMA: image extent=%ux%ux%u format=%d allocated in host/shared fallback memory\n",
+			     image_info.extent.width, image_info.extent.height, image_info.extent.depth,
+			     static_cast<int>(image_info.format));
+		}
+	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {
 		LogMemoryBudget();
