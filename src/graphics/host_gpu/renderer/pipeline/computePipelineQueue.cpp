@@ -100,8 +100,7 @@ void ComputePipelineQueue::Stop() {
 void ComputePipelineQueue::Work(const std::stop_token& stop) {
 	KYTY_PROFILER_THREAD("ComputePipelines");
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	// Below the game's priority, as the pipeline library's compile threads: spare cores only.
-	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
 	for (;;) {
 		Job job;
@@ -116,16 +115,19 @@ void ComputePipelineQueue::Work(const std::stop_token& stop) {
 			m_background_running += job.background ? 1u : 0u;
 		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		// Background jobs (the replay's) yield even to the other compiles.
-		if (job.background) {
-			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+		if (job.urgent) {
+			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+		} else {
+			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 		}
 #endif
 		Run(job);
-		if (job.background) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+		if (job.urgent) {
+			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+		}
 #endif
+		if (job.background) {
 			{
 				std::lock_guard lock(m_mutex);
 				m_background_running--;

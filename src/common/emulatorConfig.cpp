@@ -279,7 +279,7 @@ uint32_t PipelineCompileReplayThreads() {
 	if (g_config->pipeline_compile_threads_replay != 0) {
 		return std::min(g_config->pipeline_compile_threads_replay, PipelineCompileThreads());
 	}
-	return std::max(PipelineCompileThreads() / 2u, 1u);
+	return PipelineCompileThreads();
 }
 
 bool DispatchLookaheadEnabled() {

@@ -19,17 +19,14 @@ namespace Libs::Graphics {
 
 namespace {
 
-// Prefetched parts compile while Thread_Gpu is stalled on a loading burst's first pipeline; six
-// threads leave the game two cores of an 8-core CPU during loads, when it needs little.
-constexpr uint32_t CompileThreadCount = 6;
+uint32_t GetCompileThreadCount() {
+	const auto hardware = std::thread::hardware_concurrency();
+	return hardware != 0 ? std::clamp(hardware, 4u, 16u) : 6u;
+}
 
-// Background compiles run below the game's priority: while the game runs (with asynchronous
-// pipelines, or during play), they use spare cores instead of slowing its frames. The link thread
-// keeps normal priority: until it relinks a pipeline with link-time optimization, draws run the
-// slower fast-linked one.
 void LowerThreadPriority() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
 }
 
@@ -38,7 +35,8 @@ void LowerThreadPriority() {
 PipelineLibraryCache::PipelineLibraryCache(GraphicContext& graphics, DriverPipelineCache driver_cache)
     : m_graphics(graphics), m_driver_cache(driver_cache),
       m_link_thread([this](const std::stop_token& stop) { LinkThread(stop); }) {
-	for (uint32_t i = 0; i < CompileThreadCount; i++) {
+	const uint32_t count = GetCompileThreadCount();
+	for (uint32_t i = 0; i < count; i++) {
 		m_compile_threads.emplace_back([this](const std::stop_token& stop) { CompileThread(stop); });
 	}
 }

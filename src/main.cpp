@@ -259,6 +259,8 @@ static bool g_dualsense_fix         = false;
 static bool g_timestamp_scale_given = false;
 // --sync-raw-image-buffers given (command line or kyty_settings.ini): the title profile keeps it.
 static bool g_sync_raw_given = false;
+static bool g_async_pipelines_given = false;
+static bool g_defer_dispatches_given = false;
 
 // The game's title ID: from sce_sys/param.json of a game folder, else the first PPSA/CUSA ID in
 // the game path.
@@ -326,8 +328,12 @@ static void ApplyTitleProfile(RunOptions& options, const std::string& title_id) 
 			// resolution floor instead of climbing to 3840x2160.
 			options.config.gpu_timestamp_scale_percent = 200;
 		}
-		options.config.async_pipelines_enabled  = true;
-		options.config.defer_dispatches_enabled = true;
+		if (!g_async_pipelines_given) {
+			options.config.async_pipelines_enabled = false;
+		}
+		if (!g_defer_dispatches_given) {
+			options.config.defer_dispatches_enabled = false;
+		}
 		options.config.relaxed_readback_enabled = true;
 		// Measured 8.2-8.4 instead of 5.3-5.6 fps, no new image errors (2026-10-07).
 		KYTY_SET_DEFAULT_SWITCH("KYTY_COMPUTE_CHAIN", "1");
@@ -342,9 +348,11 @@ static void ApplyTitleProfile(RunOptions& options, const std::string& title_id) 
 			options.config.sync_raw_image_buffers = true;
 		}
 		KYTY_INTERNAL_PRINTF("Title profile %s: bindless, compute chain, perf preset, timestamp-scale %u, "
-		                     "async-pipelines, defer-dispatches, relaxed-readback, RT disabled, "
+		                     "async-pipelines %s, defer-dispatches %s, relaxed-readback, RT disabled, "
 		                     "sync raw image buffers %s\n",
 		                     title_id.c_str(), options.config.gpu_timestamp_scale_percent,
+		                     options.config.async_pipelines_enabled ? "on" : "off",
+		                     options.config.defer_dispatches_enabled ? "on" : "off",
 		                     options.config.sync_raw_image_buffers ? "on" : "off");
 	}
 	// Without --dualsense-fix nothing goes to the DualSense: no vibration, no adaptive trigger
@@ -684,6 +692,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 		} else if (arg == "--async-pipelines") {
+			g_async_pipelines_given = true;
 			if (!ParseBool(value, options.config.async_pipelines_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
@@ -701,6 +710,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 		} else if (arg == "--defer-dispatches") {
+			g_defer_dispatches_given = true;
 			if (!ParseBool(value, options.config.defer_dispatches_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;

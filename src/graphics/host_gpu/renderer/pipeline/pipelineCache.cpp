@@ -1674,6 +1674,32 @@ void PipelineCache::InitializeDriverCache() {
 			m_driver_cache_write_path                     = path;
 		}
 	}
+	// Check for a legacy or precompiled -core.bin cache to merge into the active cache
+	const auto core_path = std::filesystem::path("_PipelineCache") / (cache_name + "-core.bin");
+	if (Common::File::IsFileExisting(core_path)) {
+		size_t core_loaded = 0;
+		auto core_cache = LoadDriverCacheShard(core_path, &core_loaded);
+		if (core_cache != nullptr && core_loaded > 0) {
+			if (m_driver_cache.count == 0) {
+				m_driver_cache.shards[m_driver_cache.count++] = core_cache;
+				m_driver_cache_write_path                     = shard_path(0);
+				PipelineCacheLog("Vulkan pipeline cache: adopted core cache {} ({} bytes)",
+				                 Common::PathToString(core_path), core_loaded);
+			} else {
+				(void)m_graphics.device.mergePipelineCaches(m_driver_cache.Growing(), 1, &core_cache);
+				m_graphics.device.destroyPipelineCache(core_cache, nullptr);
+				PipelineCacheLog("Vulkan pipeline cache: merged {} bytes from core cache {}",
+				                 core_loaded, Common::PathToString(core_path));
+			}
+			(void)WriteDriverCache();
+			const auto merged_core_path =
+			    std::filesystem::path("_PipelineCache") / (cache_name + "-core.bin.merged");
+			Common::File::RenameFile(core_path, merged_core_path);
+			PipelineCacheLog("Vulkan pipeline cache: saved merged cache to {} and archived core cache to {}",
+			                 Common::PathToString(m_driver_cache_write_path),
+			                 Common::PathToString(merged_core_path));
+		}
+	}
 	if (m_driver_cache.count == 0) {
 		PipelineCacheLog("Vulkan pipeline cache: disabled");
 	} else if (m_driver_cache.count > 1) {
@@ -1843,9 +1869,8 @@ void PipelineCache::ReplayPrecompiled(std::vector<ShaderPrecompile::PermutationR
 			result.valid = !result.compiled.failed;
 		}
 	};
-	// As before the compute pipeline queue (whose thread count is configured): translating with
-	// more threads gained little and widens any race in the translator.
-	const auto threads   = std::clamp(std::thread::hardware_concurrency(), 2u, 8u) - 1u;
+	// Scale translation threads up to 16 hardware threads.
+	const auto threads   = std::clamp(std::thread::hardware_concurrency(), 2u, 16u) - 1u;
 	const auto translate = [&](std::span<const size_t> group) {
 		indices = group;
 		next.store(0);
@@ -1942,6 +1967,30 @@ void PipelineCache::ReplayPrecompiled(std::vector<ShaderPrecompile::PermutationR
 		for (auto index = compute_end; index != order.end(); ++index) {
 			(void)insert(*index);
 		}
+	}
+	// Wait for all replayed compute pipelines to finish compiling before the game starts rendering
+	if (queued > 0) {
+		std::vector<std::shared_future<vk::Pipeline>> pending_futures;
+		{
+			Common::LockGuard lock(m_mutex);
+			for (const auto& [id, build]: m_compute_builds) {
+				if (build.origin == ComputeOrigin::Replay && build.result.valid()) {
+					pending_futures.push_back(build.result);
+				}
+			}
+		}
+		PipelineCacheLog("Shader precompile: waiting for {} compute pipelines to complete...",
+		                 pending_futures.size());
+		size_t done_count = 0;
+		for (auto& fut: pending_futures) {
+			fut.wait();
+			done_count++;
+			if (done_count % 25 == 0 || done_count == pending_futures.size()) {
+				PipelineCacheLog("Shader precompile: compiled {}/{} compute pipelines",
+				                 done_count, pending_futures.size());
+			}
+		}
+		(void)WriteDriverCache();
 	}
 	// KYTY_DEBUG_REPLAY_DETERMINISM=1: translates every record twice more, the two copies on
 	// different threads at the same time, and names each shader whose SPIR-V differs between

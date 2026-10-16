@@ -1,4 +1,6 @@
+#include "graphics/host_gpu/renderer/pipeline/driverCachePolicy.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderBench.h"
+#include "kytyGitVersion.h"
 
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -54,6 +56,7 @@ using ShaderPrecompile::PermutationRecord;
 struct Options {
 	std::filesystem::path    journal;
 	std::filesystem::path    out_dir;
+	std::filesystem::path    precompile_cache;
 	std::vector<std::string> hashes;      // hex prefixes
 	std::optional<ShaderType> stage;
 	bool                     time          = false;
@@ -73,6 +76,7 @@ struct Options {
 void PrintUsage() {
 	std::printf(
 	    "kyty_emulator --shader-bench <journal.shaders> [options]\n"
+	    "  --precompile-cache <cache.bin> compile records into Vulkan pipeline cache and save to disk\n"
 	    "  --hash <hex[,hex...]>   only records whose shader hash starts with one of these\n"
 	    "  --stage cs|ps|vs|...    only records of this stage\n"
 	    "  --out <dir>             write spv_<hash>_r<record>.spv per record\n"
@@ -131,6 +135,8 @@ bool ParseArgs(int argc, char* argv[], Options& o) {
 			o.time = true;
 		} else if (arg == "--validate") {
 			o.validate = true;
+		} else if (arg == "--precompile-cache" && has_value) {
+			o.precompile_cache = argv[++i];
 		} else if (arg == "--out" && has_value) {
 			o.out_dir = argv[++i];
 		} else if (arg == "--hash" && has_value) {
@@ -646,6 +652,187 @@ bool TimeCompute(const Device& dev, const std::vector<uint32_t>& spirv, uint32_t
 	return true;
 }
 
+bool PrecompileCompute(const Device& dev, VkPipelineCache cache, const std::vector<uint32_t>& spirv,
+                       uint32_t wave_size, Result& out) {
+	auto&      d     = VULKAN_HPP_DEFAULT_DISPATCHER;
+	auto       sets  = ReflectSets(spirv);
+	uint32_t   max_set = 0;
+	for (auto& s: sets) max_set = std::max(max_set, s.first);
+	std::vector<VkDescriptorSetLayout> layouts;
+	for (uint32_t s = 0; s <= max_set; s++) {
+		std::vector<VkDescriptorSetLayoutBinding> bindings;
+		std::vector<VkDescriptorBindingFlags>     flags;
+		for (auto& b: sets[s]) {
+			VkDescriptorSetLayoutBinding lb {};
+			lb.binding         = b.first;
+			lb.descriptorType  = b.second.type;
+			lb.descriptorCount = b.second.count;
+			lb.stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+			bindings.push_back(lb);
+			flags.push_back(VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
+		}
+		VkDescriptorSetLayoutBindingFlagsCreateInfo bfi {
+		    VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+		bfi.bindingCount  = static_cast<uint32_t>(flags.size());
+		bfi.pBindingFlags = flags.data();
+		VkDescriptorSetLayoutCreateInfo lci {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+		lci.pNext        = &bfi;
+		lci.bindingCount = static_cast<uint32_t>(bindings.size());
+		lci.pBindings    = bindings.data();
+		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+		if (d.vkCreateDescriptorSetLayout(dev.device, &lci, nullptr, &layout) != VK_SUCCESS) return false;
+		layouts.push_back(layout);
+	}
+	VkPushConstantRange pcr {VK_SHADER_STAGE_COMPUTE_BIT, 0,
+	                         ShaderRecompiler::IR::NativePushConstantSize};
+	VkPipelineLayoutCreateInfo plci {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+	plci.setLayoutCount         = static_cast<uint32_t>(layouts.size());
+	plci.pSetLayouts            = layouts.data();
+	plci.pushConstantRangeCount = 1;
+	plci.pPushConstantRanges    = &pcr;
+	VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+	if (d.vkCreatePipelineLayout(dev.device, &plci, nullptr, &pipeline_layout) != VK_SUCCESS) {
+		for (auto layout: layouts) d.vkDestroyDescriptorSetLayout(dev.device, layout, nullptr);
+		return false;
+	}
+
+	VkShaderModuleCreateInfo smci {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+	smci.codeSize = spirv.size() * 4u;
+	smci.pCode    = spirv.data();
+	VkShaderModule module = VK_NULL_HANDLE;
+	if (d.vkCreateShaderModule(dev.device, &smci, nullptr, &module) != VK_SUCCESS) {
+		d.vkDestroyPipelineLayout(dev.device, pipeline_layout, nullptr);
+		for (auto layout: layouts) d.vkDestroyDescriptorSetLayout(dev.device, layout, nullptr);
+		return false;
+	}
+
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rss {
+	    VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
+	rss.requiredSubgroupSize = wave_size;
+	VkComputePipelineCreateInfo cpi {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+	cpi.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	cpi.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+	cpi.stage.module = module;
+	cpi.stage.pName  = "main";
+	if (dev.subgroup_control && wave_size >= dev.min_subgroup && wave_size <= dev.max_subgroup) {
+		cpi.stage.pNext = &rss;
+	}
+	cpi.layout             = pipeline_layout;
+	cpi.basePipelineIndex  = -1;
+	VkPipeline pipeline    = VK_NULL_HANDLE;
+	const auto t0          = std::chrono::steady_clock::now();
+	out.driver_result      = static_cast<int>(
+        d.vkCreateComputePipelines(dev.device, cache, 1, &cpi, nullptr, &pipeline));
+	out.driver_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	if (pipeline != VK_NULL_HANDLE) d.vkDestroyPipeline(dev.device, pipeline, nullptr);
+	d.vkDestroyShaderModule(dev.device, module, nullptr);
+	d.vkDestroyPipelineLayout(dev.device, pipeline_layout, nullptr);
+	for (auto layout: layouts) d.vkDestroyDescriptorSetLayout(dev.device, layout, nullptr);
+	return out.driver_result == VK_SUCCESS;
+}
+
+VkPipelineCache LoadCacheFile(const Device& dev, const std::filesystem::path& path) {
+	auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+	std::vector<uint8_t> initial_data;
+	if (std::filesystem::exists(path)) {
+		std::ifstream file(path, std::ios::binary | std::ios::ate);
+		const auto file_size = file.tellg();
+		if (file_size > 0) {
+			file.seekg(0, std::ios::beg);
+			std::vector<char> raw(static_cast<size_t>(file_size));
+			file.read(raw.data(), file_size);
+
+			DriverCachePolicy::HostIdentity host {
+				.vendor = dev.properties.vendorID,
+				.device = dev.properties.deviceID,
+				.driver = dev.properties.driverVersion,
+				.optimization = static_cast<uint32_t>(Config::GetShaderOptimizationType())
+			};
+			std::memcpy(host.uuid.data(), dev.properties.pipelineCacheUUID, host.uuid.size());
+
+			const auto header_size = DriverCachePolicy::FindBlobHeaderBytes(
+				std::span<const char>(raw.data(), raw.size()), host, KYTY_SHADER_CACHE_KEY, "");
+			if (header_size > 0 && file_size > static_cast<std::streampos>(header_size + sizeof(uint64_t))) {
+				uint64_t payload_hash = 0;
+				std::memcpy(&payload_hash, raw.data() + header_size, sizeof(payload_hash));
+				const auto payload_offset = header_size + sizeof(payload_hash);
+				const auto payload_size = static_cast<size_t>(file_size) - payload_offset;
+				const auto* payload_ptr = reinterpret_cast<const uint8_t*>(raw.data() + payload_offset);
+				if (DriverCachePolicy::PayloadChecksumMatches(std::span<const uint8_t>(payload_ptr, payload_size), payload_hash) &&
+				    DriverCachePolicy::PayloadHostHeaderMatches(std::span<const uint8_t>(payload_ptr, payload_size), host)) {
+					initial_data.assign(payload_ptr, payload_ptr + payload_size);
+					std::printf("precompiler: loaded %zu bytes from %s\n", initial_data.size(), path.string().c_str());
+				}
+			}
+		}
+	}
+	VkPipelineCacheCreateInfo ci {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+	ci.initialDataSize = initial_data.size();
+	ci.pInitialData = initial_data.empty() ? nullptr : initial_data.data();
+	VkPipelineCache cache = VK_NULL_HANDLE;
+	d.vkCreatePipelineCache(dev.device, &ci, nullptr, &cache);
+	return cache;
+}
+
+bool SaveCacheFile(const Device& dev, VkPipelineCache cache, const std::filesystem::path& path) {
+	auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+	size_t size = 0;
+	if (d.vkGetPipelineCacheData(dev.device, cache, &size, nullptr) != VK_SUCCESS || size == 0) {
+		std::printf("precompiler: failed to get pipeline cache data\n");
+		return false;
+	}
+	std::vector<uint8_t> payload(size);
+	if (d.vkGetPipelineCacheData(dev.device, cache, &size, payload.data()) != VK_SUCCESS) {
+		std::printf("precompiler: failed to read pipeline cache data\n");
+		return false;
+	}
+	payload.resize(size);
+
+	DriverCachePolicy::HostIdentity host {
+		.vendor = dev.properties.vendorID,
+		.device = dev.properties.deviceID,
+		.driver = dev.properties.driverVersion,
+		.optimization = static_cast<uint32_t>(Config::GetShaderOptimizationType())
+	};
+	std::memcpy(host.uuid.data(), dev.properties.pipelineCacheUUID, host.uuid.size());
+
+	auto prefix = DriverCachePolicy::BlobSignature(host, KYTY_SHADER_CACHE_KEY);
+	const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
+	prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
+
+	std::filesystem::create_directories(path.parent_path());
+	const auto temp_path = path.string() + ".tmp";
+	std::ofstream out(temp_path, std::ios::binary);
+	if (!out) {
+		std::printf("precompiler: cannot create %s\n", temp_path.c_str());
+		return false;
+	}
+	out.write(prefix.data(), prefix.size());
+	out.write(reinterpret_cast<const char*>(payload.data()), payload.size());
+	out.close();
+
+#if defined(_WIN32)
+	auto src_wide = std::filesystem::path(temp_path).wstring();
+	auto dst_wide = std::filesystem::path(path).wstring();
+	const bool success = MoveFileExW(src_wide.c_str(), dst_wide.c_str(),
+	                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0;
+	if (!success) {
+		std::printf("precompiler: failed to move %s to %s (error %lu)\n",
+		            temp_path.c_str(), path.string().c_str(), GetLastError());
+		return false;
+	}
+#else
+	std::error_code ec;
+	std::filesystem::rename(temp_path, path, ec);
+	if (ec) {
+		std::filesystem::remove(path, ec);
+		std::filesystem::rename(temp_path, path, ec);
+	}
+#endif
+	std::printf("precompiler: successfully saved %zu bytes to %s\n", payload.size(), path.string().c_str());
+	return true;
+}
+
 // Format 7 journals (before compute float_mode/lds_storage and buffer indirect fields were
 // recorded): their compute records only, read without the codec, missing fields at their
 // defaults (float_mode 0xc0, no indirect buffers; lds_storage per --lds-storage, default the live
@@ -792,7 +979,10 @@ int Run(int argc, char* argv[]) {
 
 	Device                device;
 	const bool            have_device = CreateDevice(device);
-	if (o.time && !have_device) return 1;
+	if ((o.time || !o.precompile_cache.empty()) && !have_device) return 1;
+	if (!o.precompile_cache.empty() && o.jobs == 1) {
+		o.jobs = std::clamp(std::thread::hardware_concurrency(), 2u, 16u);
+	}
 	const uint32_t max_lds = o.max_lds_bytes != 0 ? o.max_lds_bytes
 	                         : have_device        ? device.properties.limits.maxComputeSharedMemorySize
 	                                              : 48u * 1024u;
@@ -812,6 +1002,25 @@ int Run(int argc, char* argv[]) {
 	}
 	std::printf("selected: %zu records\n", selected.size());
 	if (!o.out_dir.empty()) std::filesystem::create_directories(o.out_dir);
+
+	VkPipelineCache target_cache = VK_NULL_HANDLE;
+	std::filesystem::path core_path;
+	bool merged_core = false;
+	if (!o.precompile_cache.empty() && have_device) {
+		auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+		target_cache = LoadCacheFile(device, o.precompile_cache);
+		const auto stem = o.precompile_cache.stem().string();
+		core_path = o.precompile_cache.parent_path() / (stem + "-core.bin");
+		if (std::filesystem::exists(core_path)) {
+			VkPipelineCache core_cache = LoadCacheFile(device, core_path);
+			if (core_cache != VK_NULL_HANDLE) {
+				d.vkMergePipelineCaches(device.device, target_cache, 1, &core_cache);
+				d.vkDestroyPipelineCache(device.device, core_cache, nullptr);
+				std::printf("precompiler: merged core cache %s\n", core_path.string().c_str());
+				merged_core = true;
+			}
+		}
+	}
 
 	std::vector<Result> results(selected.size());
 	std::atomic_size_t  next {0};
@@ -838,7 +1047,10 @@ int Run(int argc, char* argv[]) {
 			            static_cast<unsigned long long>(record.hash), StageName(record.stage));
 			continue;
 		}
-		if (o.time && record.stage == ShaderType::Compute) {
+		if (!o.precompile_cache.empty() && have_device && record.stage == ShaderType::Compute) {
+			(void)PrecompileCompute(device, target_cache, r.spirv, r.wave_size, r);
+			total_driver += r.driver_s;
+		} else if (o.time && record.stage == ShaderType::Compute) {
 			(void)TimeCompute(device, r.spirv, r.wave_size, r);
 			total_driver += r.driver_s;
 		}
@@ -871,6 +1083,27 @@ int Run(int argc, char* argv[]) {
 		std::fflush(stdout);
 	}
 	std::printf("total: translate+emit %.1f ms, driver %.2f s\n", total_translate, total_driver);
+	if (!o.precompile_cache.empty() && have_device && target_cache != VK_NULL_HANDLE) {
+		auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
+		SaveCacheFile(device, target_cache, o.precompile_cache);
+		d.vkDestroyPipelineCache(device.device, target_cache, nullptr);
+		if (merged_core) {
+#if defined(_WIN32)
+			auto src_w = core_path.wstring();
+			auto dst_w = (core_path.string() + ".merged");
+			std::filesystem::path dst_p(dst_w);
+			MoveFileExW(src_w.c_str(), dst_p.wstring().c_str(),
+			            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+#else
+			std::error_code ec;
+			std::filesystem::rename(core_path, core_path.string() + ".merged", ec);
+#endif
+		}
+		std::printf("\n===================================================\n");
+		std::printf("  [Precompiler] Precompilacao de shaders concluida!\n");
+		std::printf("  Arquivo salvo: %s\n", o.precompile_cache.string().c_str());
+		std::printf("===================================================\n");
+	}
 	if (have_device) {
 		auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
 		d.vkDestroyDevice(device.device, nullptr);

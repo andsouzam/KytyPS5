@@ -32,38 +32,48 @@ inline std::string JournalSignature(const HostIdentity& host,std::string_view so
 inline std::string BlobSignature(const HostIdentity& host,[[maybe_unused]] std::string_view source) {
   return "KytyPC4:"+HostSuffix(host);
 }
+inline std::string HostPrefix(const HostIdentity& host) {
+  constexpr char hex[]="0123456789abcdef";
+  std::string uuid(32,'0');
+  for(size_t i=0;i<host.uuid.size();++i) {
+    uuid[2*i]=hex[host.uuid[i]>>4u]; uuid[2*i+1]=hex[host.uuid[i]&15u];
+  }
+  return fmt::format("{:08x}:{:08x}:{:08x}:{}",
+      host.vendor,host.device,host.driver,uuid);
+}
 inline size_t LegacyBlobHeaderBytes(const HostIdentity& host,std::string_view diagnostic) {
   return std::string_view("KytyPC3:").size()+64u+1u+HostSuffix(host).size()+diagnostic.size();
 }
 inline bool BlobHeaderCompatible(std::string_view stored,const HostIdentity& host,
     std::string_view source,std::string_view diagnostic) {
   if(stored==BlobSignature(host,source)+std::string(diagnostic))return true;
-  constexpr std::string_view legacy="KytyPC3:";
-  if(stored.size()!=LegacyBlobHeaderBytes(host,diagnostic) || !stored.starts_with(legacy) ||
-      stored[legacy.size()+64u]!=':')return false;
-  const auto compiler_token=stored.substr(legacy.size(),64u);
-  if(!std::ranges::all_of(compiler_token,[](unsigned char c) {
-      return (c>='0'&&c<='9') || (c>='a'&&c<='f') || (c>='A'&&c<='F');
-    }))return false;
-  // Accept an old wrapper only under the SAME complete host/config/diagnostic
-  // tail. The legacy compiler token is not edited or used to open any journal.
-  return stored.substr(legacy.size()+64u+1u)==HostSuffix(host)+std::string(diagnostic);
+  if(!stored.starts_with("KytyPC3:") && !stored.starts_with("KytyPC4:"))return false;
+  if(!diagnostic.empty() && !stored.ends_with(diagnostic))return false;
+  return stored.find(HostPrefix(host))!=std::string_view::npos;
 }
-inline size_t MaxBlobHeaderBytes(const HostIdentity& host,std::string_view source,
-    std::string_view diagnostic) {
-  return std::max(BlobSignature(host,source).size()+diagnostic.size(),
-      LegacyBlobHeaderBytes(host,diagnostic));
+inline size_t MaxBlobHeaderBytes([[maybe_unused]] const HostIdentity& host,
+    [[maybe_unused]] std::string_view source,
+    [[maybe_unused]] std::string_view diagnostic) {
+  return 512u;
 }
 inline size_t FindBlobHeaderBytes(std::span<const char> probe,const HostIdentity& host,
     std::string_view source,std::string_view diagnostic) {
-  const auto current=BlobSignature(host,source)+std::string(diagnostic);
-  if(probe.size()>=current.size() &&
-      BlobHeaderCompatible(std::string_view(probe.data(),current.size()),host,source,diagnostic))
-    return current.size();
-  const auto legacy=LegacyBlobHeaderBytes(host,diagnostic);
-  return probe.size()>=legacy &&
-      BlobHeaderCompatible(std::string_view(probe.data(),legacy),host,source,diagnostic)
-      ? legacy:0u;
+  if(probe.size()<16u)return 0u;
+  const std::string_view str(probe.data(),probe.size());
+  if(!str.starts_with("KytyPC3:") && !str.starts_with("KytyPC4:"))return 0u;
+  const auto nl=str.find('\n');
+  if(nl==std::string_view::npos)return 0u;
+  size_t header_len=nl+1u;
+  if(!diagnostic.empty()) {
+    if(str.substr(header_len).starts_with(diagnostic)) {
+      header_len+=diagnostic.size();
+    }
+  }
+  if(header_len<=probe.size() &&
+     BlobHeaderCompatible(str.substr(0,header_len),host,source,diagnostic)) {
+    return header_len;
+  }
+  return 0u;
 }
 inline bool EnvelopeSizeValid(uint64_t size,size_t header) {
   return header!=0u && header<=UINT32_MAX-sizeof(uint64_t) &&
