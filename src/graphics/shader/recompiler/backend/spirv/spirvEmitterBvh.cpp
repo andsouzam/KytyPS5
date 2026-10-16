@@ -296,6 +296,15 @@ void DefineBvhIntersect(EmitterState& s) {
 	for (uint32_t i = 0; i < 4; ++i)
 		invalid_words[i] = Select(s, u, triangle, triangle_invalid[i], box_invalid[i]);
 	const auto invalid = Vector(s, vec4, invalid_words);
+	static const bool disable_rt = [] {
+		const char* env = KYTY_GETENV("KYTY_DISABLE_RAY_TRACING");
+		return env == nullptr || std::strcmp(env, "0") != 0;
+	}();
+	if (disable_rt) {
+		s.builder.AddFunction(spv::OpReturnValue, invalid);
+		s.builder.AddFunction(spv::OpFunctionEnd);
+		return;
+	}
 	const auto result = EmitValueOrDefaultIfCondition(s, valid, vec4, invalid, [&] {
 		const auto first = GetBdaPointer(s, address);
 		const auto second = EmitValueOrDefaultIfCondition(s, full, wide, ConstantDeviceAddress(s, 0), [&] {

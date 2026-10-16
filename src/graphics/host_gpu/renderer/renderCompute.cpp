@@ -996,9 +996,12 @@ bool RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 	FindBuffers(bindings);
 	DebugDumpDispatchInputs(m_context, input_info.stage);
-	if (program.info.uses_dma) {
+	static const bool disable_rt = [] {
+		const char* env = KYTY_GETENV("KYTY_DISABLE_RAY_TRACING");
+		return env == nullptr || std::strcmp(env, "0") != 0;
+	}();
+	if (program.info.uses_dma && !disable_rt) {
 		PrefetchBvhs(m_context.GetBufferCache(), *input_info.stage.resources);
-		m_context.PrepareBda();
 	}
 	if (program.shader_hash == 0x380bb9d636390baeull && BvhCheckEnabled()) [[unlikely]] {
 		static uint32_t described = 0;

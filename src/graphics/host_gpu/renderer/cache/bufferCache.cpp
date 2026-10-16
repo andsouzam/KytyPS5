@@ -874,6 +874,11 @@ bool BufferCache::PollReadMemory(uint64_t vaddr, uint64_t size) {
 		return true;
 	}
 	EXIT_IF(state.unarmed || state.tick > m_scheduler.CurrentTick());
+	if (state.tick < m_scheduler.CurrentTick() &&
+	    TryPublishCompletedOrdinaryReadback(vaddr, size, state.tick)) {
+		WaitPollDiagnostic::NotePoll(WaitPollDiagnostic::PollPath::TrackerClean);
+		return true;
+	}
 	// A publication queued on the open buffer cannot progress unless it is submitted.
 	// Submission preserves queue order; the command parser does not wait for its fence.
 	const bool wait_diag_flushed = state.tick == m_scheduler.CurrentTick();
@@ -1316,12 +1321,19 @@ void BufferCache::MarkReadbackHot(uint64_t vaddr) {
 }
 
 void BufferCache::QueueEagerReadback(uint64_t vaddr, uint64_t size) {
-	const auto end = vaddr + size;
-	for (const auto& [page, tick]: m_hot_pages) {
-		(void)tick;
+	const auto end      = vaddr + size;
+	const auto cur_tick = m_scheduler.CurrentTick();
+	for (auto it = m_hot_pages.begin(); it != m_hot_pages.end();) {
+		if (cur_tick > it->second && (cur_tick - it->second) > 256u) {
+			m_memory_tracker.SetReadbackHot(it->first, TRACKER_PAGE_SIZE, false);
+			it = m_hot_pages.erase(it);
+			continue;
+		}
+		const auto page = it->first;
 		if (page < end && page + TRACKER_PAGE_SIZE > vaddr) {
 			m_eager_pending.push_back(page);
 		}
+		++it;
 	}
 }
 

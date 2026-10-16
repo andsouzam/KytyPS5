@@ -432,7 +432,6 @@ void CommandProcessor::BufferFlush() {
 }
 
 void CommandProcessor::BufferFlushIfGpuIdle() {
-	m_renderer.GetBufferCache().RecordEagerReadbacks();
 	auto& scheduler = GetScheduler();
 	// An idle GPU finishes a label's few draws in tens of microseconds, so submitting at every
 	// idle label made hundreds of tiny submits a frame whose CPU cost starved the GPU. Batch
@@ -440,6 +439,7 @@ void CommandProcessor::BufferFlushIfGpuIdle() {
 	const bool batched =
 	    scheduler.MicrosSinceSubmit() >= Config::GetLabelFlushIntervalUs();
 	if (batched && scheduler.IsFree(scheduler.CurrentTick() - 1)) {
+		m_renderer.GetBufferCache().RecordEagerReadbacks();
 		scheduler.Flush();
 	}
 }
@@ -447,9 +447,9 @@ void CommandProcessor::BufferFlushIfGpuIdle() {
 void CommandProcessor::BufferFlushForInterrupt() {
 	// An interrupt fires when its tick completes, so that tick must be submitted. Within the
 	// minimum interval it batches instead: the end of the submission slice submits at the latest.
-	m_renderer.GetBufferCache().RecordEagerReadbacks();
 	auto& scheduler = GetScheduler();
 	if (scheduler.MicrosSinceSubmit() >= Config::GetLabelFlushIntervalUs()) {
+		m_renderer.GetBufferCache().RecordEagerReadbacks();
 		scheduler.Flush();
 	}
 }

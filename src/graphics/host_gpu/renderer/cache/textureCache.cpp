@@ -3584,7 +3584,8 @@ void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size,
 			continue;
 		}
 		if (exact && (image.info.data.address < address ||
-		              image.info.data.End() > address + size)) {
+		              image.info.data.End() > address + size ||
+		              (image.info.IsTiled() && image.info.data.size != size))) {
 			continue;
 		}
 		if (GpuZones::Enabled()) [[unlikely]] {
