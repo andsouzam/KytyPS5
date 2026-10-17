@@ -946,12 +946,14 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	    GetShaderParams(regs.ls_regs.data_addr, "ShaderRecompiler LS", local_users, local),
 	    GetShaderParams(regs.hs_regs.data_addr, "ShaderRecompiler HS", local_users, control, 8u),
 	    GetShaderParams(regs.es_regs.data_addr, "ShaderRecompiler TES", evaluation_users,
-	                    evaluation),
+	                    evaluation, 8u),
 	};
 	// The fused HS back half receives its separate user-data address in s0:s1.
 	// RDNA2 reserves s0:s7 before the native HS user SGPRs.
 	params[1].user_data[0] = static_cast<uint32_t>(regs.hs_regs.user_data_addr);
 	params[1].user_data[1] = static_cast<uint32_t>(regs.hs_regs.user_data_addr >> 32u);
+	params[2].user_data[0] = static_cast<uint32_t>(regs.gs_regs.user_data_addr);
+	params[2].user_data[1] = static_cast<uint32_t>(regs.gs_regs.user_data_addr >> 32u);
 
 	for (auto& stage: input_info) {
 		ResetVertexInputInfo(stage);
