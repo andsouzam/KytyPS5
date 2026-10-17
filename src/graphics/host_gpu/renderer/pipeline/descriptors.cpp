@@ -2406,17 +2406,6 @@ void RenderExecutor::ResolveBindlessHeapEagerly(BindlessTable::Heap& heap, uint3
 		}
 		if (!PlausibleImageDescriptor(descriptor)) {
 			other++;
-			// Once per distinct record: other data, not an image.
-			uint64_t hash = 0xcbf29ce484222325ull;
-			for (const auto word: value.dwords) hash = (hash ^ word) * 0x100000001b3ull;
-			if (reported.size() < 2048 && reported.insert(hash).second) {
-				std::printf("\x1b[91mbindless-eager: cs %016llx heap 0x%llx key %u skipped, no image T#: "
-				            "%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\x1b[0m\n",
-				            static_cast<unsigned long long>(shader_hash),
-				            static_cast<unsigned long long>(heap.base), key, value.dwords[0],
-				            value.dwords[1], value.dwords[2], value.dwords[3], value.dwords[4],
-				            value.dwords[5], value.dwords[6], value.dwords[7]);
-			}
 			continue;
 		}
 		if (descriptor.Type() != Prospero::ImageType::kColor3D) {

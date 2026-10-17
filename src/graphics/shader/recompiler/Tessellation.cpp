@@ -100,9 +100,7 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 				}
 			}
 			if (!is_exit) {
-				LOGF("ReflectTessellationStride (%s): internal branch at pc 0x%08x target 0x%08x back 0x%08x\n",
-				     local ? "LS" : "HS", inst.pc, inst.branch_target,
-				     program.instructions.empty() ? 0u : program.instructions.back().pc);
+				// Internal branches during reflection are expected and safe.
 			}
 		}
 		const bool local_store =
@@ -138,6 +136,17 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 		switch (inst.opcode) {
 			case Opcode::V_MOV_B32:
 				value = lhs;
+				break;
+			case Opcode::V_AND_B32:
+				if ((lhs.kind == Kind::PackedControlPoint && rhs.kind == Kind::Affine &&
+				     rhs.coefficient == 0u && rhs.constant == 0xffu) ||
+				    (rhs.kind == Kind::PackedControlPoint && lhs.kind == Kind::Affine &&
+				     lhs.coefficient == 0u && lhs.constant == 0xffu)) {
+					value = constant(0u);
+				} else if (lhs.kind == Kind::Affine && rhs.kind == Kind::Affine &&
+				           lhs.coefficient == 0u && rhs.coefficient == 0u) {
+					value = constant(lhs.constant & rhs.constant);
+				}
 				break;
 			case Opcode::V_BFE_U32:
 				if (lhs.kind == Kind::PackedControlPoint && rhs.kind == Kind::Affine &&
@@ -192,18 +201,10 @@ uint32_t ReflectTessellationStride(const Decoder::Program& program, bool local,
 		registers.at(inst.dst.reg) = value;
 	}
 	if (stride == 0u) {
-		::printf("=== ReflectTessellationStride (%s, cp=%u, input_stride=%u, insts=%zu) ===\n",
-		         local ? "LS" : "HS", control_points, input_stride, program.instructions.size());
-		for (const auto& i: program.instructions) {
-			::printf("  [0x%04x] %s\n", i.pc, InstructionToString(i).c_str());
-		}
 		if (!local && input_stride != 0u) {
-			::printf("ReflectTessellationStride: HS has no control output stores, using input_stride (%u)\n",
-			         input_stride);
 			stride = input_stride;
 		} else if (local) {
 			// In case LS stride could not be inferred, default to standard vertex stride (32 bytes)
-			::printf("ReflectTessellationStride: LS stride could not be inferred, defaulting to 32 bytes\n");
 			stride = 32u;
 		}
 	}
@@ -288,6 +289,7 @@ void LowerTessellationMemory(IR::Program& program, const CompileOptions& options
 			const auto&           memory = program.memory_info.at(inst.Flags<MemoryFlags>().index);
 			bool                  write  = false;
 			uint32_t              components = 0;
+			uint32_t              patch_addr = UINT32_MAX;
 			TessellationAttribute kind;
 			Value                 address, predicate;
 			if (shared != SharedAccess::None && memory.kind == ResourceKind::Lds) {
@@ -324,15 +326,20 @@ void LowerTessellationMemory(IR::Program& program, const CompileOptions& options
 					EXIT_NOT_IMPLEMENTED(write
 					                         ? options.stage != ShaderType::TessellationControl
 					                         : options.stage != ShaderType::TessellationEvaluation);
-					uint32_t patch_addr = UINT32_MAX;
+					patch_addr = UINT32_MAX;
 					if (address.IsImmediate()) {
 						patch_addr = address.U32();
-					} else if (const auto* src_i = address.TryInstruction();
-					           src_i != nullptr && src_i->GetOpcode() == ValueOpcode::IAdd32) {
-						if (src_i->Arg(0).Resolve().IsImmediate()) {
-							patch_addr = src_i->Arg(0).Resolve().U32();
-						} else if (src_i->Arg(1).Resolve().IsImmediate()) {
-							patch_addr = src_i->Arg(1).Resolve().U32();
+					} else if (const auto* src_i = address.TryInstruction(); src_i != nullptr) {
+						if (src_i->GetOpcode() == ValueOpcode::IAdd32) {
+							if (src_i->Arg(0).Resolve().IsImmediate()) {
+								patch_addr = src_i->Arg(0).Resolve().U32();
+							} else if (src_i->Arg(1).Resolve().IsImmediate()) {
+								patch_addr = src_i->Arg(1).Resolve().U32();
+							}
+						} else if (src_i->GetOpcode() == ValueOpcode::ISub32) {
+							if (src_i->Arg(0).Resolve().IsImmediate()) {
+								patch_addr = src_i->Arg(0).Resolve().U32();
+							}
 						}
 					}
 					if (patch_addr != UINT32_MAX &&
@@ -350,7 +357,13 @@ void LowerTessellationMemory(IR::Program& program, const CompileOptions& options
 			for (uint32_t component = 0; component < components; component++) {
 				const auto offset = memory.offset + 4u * component;
 				const auto byte_address =
-				    offset == 0u ? address : emit(ValueOpcode::IAdd32, {address, Value(offset)});
+				    kind == TessellationAttribute::PatchOutput
+				        ? Value((patch_addr != UINT32_MAX &&
+				                 patch_addr >= tess.hs_stride * tess.output_control_points &&
+				                 patch_addr < 0x8000u)
+				                    ? (patch_addr + offset - tess.hs_stride * tess.output_control_points)
+				                    : offset)
+				        : (offset == 0u ? address : emit(ValueOpcode::IAdd32, {address, Value(offset)}));
 				if (write) {
 					Value data = shared != SharedAccess::None ? inst.Arg(component + 1u)
 					             : components == 1u

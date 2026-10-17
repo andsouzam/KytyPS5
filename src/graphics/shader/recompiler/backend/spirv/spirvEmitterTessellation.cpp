@@ -56,15 +56,12 @@ uint32_t TessellationPointer(ValueEmitContext& ctx, const IR::Inst& inst) {
 			const auto index        = max_factors > 0 ? (raw_index % max_factors) : 0u;
 			const bool outer        = index < outer_count;
 			const auto target_index = outer ? index : (index - outer_count);
-			LOGF("Tessellation Factor: resolved byte_offset=%u -> index=%u (outer=%d, target=%u)\n",
-			     *constant_byte_offset, index, outer, target_index);
 			state.builder.AddFunction(spv::OpAccessChain, type,
 			                          pointer, outer ? variable : state.tess_inner_variable,
 			                          ConstantU32(state, target_index));
 			return pointer;
 		}
 
-		LOGF("Tessellation Factor: dynamic offset fallback, defaulting to outer[0]\n");
 		state.builder.AddFunction(spv::OpAccessChain, type, pointer, variable, ConstantU32(state, 0));
 		return pointer;
 	}
@@ -148,9 +145,7 @@ void DefineTessellationInterfaces(EmitterState& state) {
 		if (kind == Attribute::Factor) {
 			type = array(TypeF32(state), 4u);
 		} else if (kind == Attribute::PatchOutput) {
-			const auto patch_base = tess.hs_stride * tess.output_control_points;
-			state.tess_patch_base = (patch_begin != UINT32_MAX && patch_begin < patch_base)
-			                            ? patch_begin : patch_base;
+			state.tess_patch_base = patch_begin != UINT32_MAX ? patch_begin : 0u;
 			const auto span = (patch_end > state.tess_patch_base)
 			                      ? (patch_end - state.tess_patch_base) : 16u;
 			type = array(TypeU32Vector(state, 4), (span + 15u) / 16u);
