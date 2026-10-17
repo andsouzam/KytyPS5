@@ -13,7 +13,9 @@ uint32_t TessellationPointer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto& tess     = state.input_info.vertex->tess;
 	const auto  variable = state.tess_variables.at(static_cast<uint32_t>(kind));
 	EXIT_IF(variable == 0);
-	const auto input   = kind == Attribute::ControlInput || kind == Attribute::EvaluationInput;
+	const auto input = kind == Attribute::ControlInput || kind == Attribute::EvaluationInput ||
+	                   (kind == Attribute::PatchOutput &&
+	                    state.program.stage == ShaderType::TessellationEvaluation);
 	const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
 	const auto pointer = state.builder.AllocateId();
 	if (kind == Attribute::Factor) {
@@ -116,9 +118,14 @@ void DefineTessellationInterfaces(EmitterState& state) {
 				if (patch_arg.IsImmediate()) {
 					patch_offset = patch_arg.U32();
 				} else if (const auto* src_i = patch_arg.TryInstruction();
-				           src_i != nullptr && src_i->GetOpcode() == IR::ValueOpcode::IAdd32 &&
-				           src_i->Arg(1).Resolve().IsImmediate()) {
-					patch_offset = src_i->Arg(1).Resolve().U32();
+				           src_i != nullptr && src_i->GetOpcode() == IR::ValueOpcode::IAdd32) {
+					if (src_i->Arg(0).Resolve().IsImmediate() && src_i->Arg(1).Resolve().IsImmediate()) {
+						patch_offset = src_i->Arg(0).Resolve().U32() + src_i->Arg(1).Resolve().U32();
+					} else if (src_i->Arg(0).Resolve().IsImmediate()) {
+						patch_offset = src_i->Arg(0).Resolve().U32();
+					} else if (src_i->Arg(1).Resolve().IsImmediate()) {
+						patch_offset = src_i->Arg(1).Resolve().U32();
+					}
 				}
 				patch_begin = std::min(patch_begin, patch_offset);
 				patch_end   = std::max(patch_end, patch_offset + 4u);
@@ -133,14 +140,20 @@ void DefineTessellationInterfaces(EmitterState& state) {
 	for (uint32_t index = 0; index < used.size(); index++) {
 		if (!used[index]) continue;
 		const auto kind    = static_cast<Attribute>(index);
-		const bool input   = kind == Attribute::ControlInput || kind == Attribute::EvaluationInput;
+		const bool input   = kind == Attribute::ControlInput || kind == Attribute::EvaluationInput ||
+		                   (kind == Attribute::PatchOutput &&
+		                    state.program.stage == ShaderType::TessellationEvaluation);
 		const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
 		uint32_t   type;
 		if (kind == Attribute::Factor) {
 			type = array(TypeF32(state), 4u);
 		} else if (kind == Attribute::PatchOutput) {
-			state.tess_patch_base = patch_begin;
-			type = array(TypeU32Vector(state, 4), (patch_end - patch_begin + 15u) / 16u);
+			const auto patch_base = tess.hs_stride * tess.output_control_points;
+			state.tess_patch_base = (patch_begin != UINT32_MAX && patch_begin < patch_base)
+			                            ? patch_begin : patch_base;
+			const auto span = (patch_end > state.tess_patch_base)
+			                      ? (patch_end - state.tess_patch_base) : 16u;
+			type = array(TypeU32Vector(state, 4), (span + 15u) / 16u);
 		} else {
 			const bool local  = kind == Attribute::LocalOutput || kind == Attribute::ControlInput;
 			const auto stride = local ? tess.ls_stride : tess.hs_stride;

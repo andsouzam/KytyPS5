@@ -324,9 +324,19 @@ void LowerTessellationMemory(IR::Program& program, const CompileOptions& options
 					EXIT_NOT_IMPLEMENTED(write
 					                         ? options.stage != ShaderType::TessellationControl
 					                         : options.stage != ShaderType::TessellationEvaluation);
-					if (address.IsImmediate() &&
-					    address.U32() >= tess.hs_stride * tess.output_control_points) {
-						EXIT_NOT_IMPLEMENTED(!write);
+					uint32_t patch_addr = UINT32_MAX;
+					if (address.IsImmediate()) {
+						patch_addr = address.U32();
+					} else if (const auto* src_i = address.TryInstruction();
+					           src_i != nullptr && src_i->GetOpcode() == ValueOpcode::IAdd32) {
+						if (src_i->Arg(0).Resolve().IsImmediate()) {
+							patch_addr = src_i->Arg(0).Resolve().U32();
+						} else if (src_i->Arg(1).Resolve().IsImmediate()) {
+							patch_addr = src_i->Arg(1).Resolve().U32();
+						}
+					}
+					if (patch_addr != UINT32_MAX &&
+					    (patch_addr + memory.offset) >= tess.hs_stride * tess.output_control_points) {
 						kind = TessellationAttribute::PatchOutput;
 					}
 				}
