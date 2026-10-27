@@ -185,8 +185,10 @@ void BufferCache::ChangeRegister(BufferId id) {
 	PageTable::PageRange pages {};
 	if (!(GuestRange {buffer.CpuAddress(), buffer.Size()}.Valid()) ||
 	    !PageTable::TryGetPageRange(buffer.CpuAddress(), buffer.Size(), pages)) [[unlikely]] {
+#if defined(_WIN32)
 		void*      frames[8] {};
 		const auto count = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
+#endif
 		std::printf("\x1b[91mbuffer-register: %s an invalid range: buffer %u address=0x%016llx size=0x%llx; "
 		            "last create on this thread: request 0x%016llx+0x%llx -> joined 0x%016llx..0x%016llx "
 		            "(%u buffers joined); stack",
@@ -197,9 +199,11 @@ void BufferCache::ChangeRegister(BufferId id) {
 		            static_cast<unsigned long long>(t_last_create.size),
 		            static_cast<unsigned long long>(t_last_create.begin),
 		            static_cast<unsigned long long>(t_last_create.end), t_last_create.joined);
+#if defined(_WIN32)
 		for (USHORT i = 0; i < count; i++) {
 			std::printf(" %p", frames[i]);
 		}
+#endif
 		std::printf("\x1b[0m\n");
 		std::fflush(stdout);
 	}
@@ -1848,6 +1852,7 @@ void JoinAsyncUploads() noexcept {
 // mapped foreign memory, and prints what the driver answers: whether guest memory could back
 // buffers directly instead of being copied.
 static void DebugHostImportTest(GraphicContext& graphics, uint64_t address) {
+#if defined(_WIN32)
 	static bool done = KYTY_GETENV("KYTY_DEBUG_HOST_IMPORT_TEST") == nullptr;
 	if (done) {
 		return;
@@ -1929,6 +1934,10 @@ static void DebugHostImportTest(GraphicContext& graphics, uint64_t address) {
 		std::fflush(stdout);
 	}
 	}
+#else
+	(void)graphics;
+	(void)address;
+#endif
 }
 
 vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
