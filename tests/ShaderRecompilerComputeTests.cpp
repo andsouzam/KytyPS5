@@ -99,8 +99,12 @@
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
 #include <cerrno>
+#include <cstdlib>
 #include <sys/wait.h>
 #include <unistd.h>
+inline int _putenv_s(const char* name, const char* value) {
+	return (value != nullptr && value[0] != '\0') ? setenv(name, value, 1) : unsetenv(name);
+}
 #endif
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS

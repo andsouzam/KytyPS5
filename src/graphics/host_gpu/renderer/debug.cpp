@@ -632,7 +632,7 @@ uint64_t DrawPhaseTimer::Hash() {
 		if (text == nullptr) {
 			return uint64_t {0};
 		}
-		return std::strcmp(text, "all") == 0 ? AllDraws : std::strtoull(text, nullptr, 16);
+		return std::strcmp(text, "all") == 0 ? AllDraws : static_cast<uint64_t>(std::strtoull(text, nullptr, 16));
 	}();
 	return hash;
 }

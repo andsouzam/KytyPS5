@@ -416,6 +416,21 @@ list(REMOVE_DUPLICATES kyty_emulator_src)
 
 if (KYTY_CLANG_CL)
 	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
+else()
+	set_source_files_properties(
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/computePipelineQueue.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/dispatchReplay.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/temporalDlss.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/vertexExplode.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ShaderRecompiler.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/backend/spirv/SpirvEmitter.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/backend/spirv/spirvEmitterFlow.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/cfg/ShaderCFG.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/frontend/decode/ShaderDecoder.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+		PROPERTIES COMPILE_FLAGS "-fexceptions"
+	)
 endif()
 
 include("${KYTY_SOURCE_DIR}/dlss.cmake")
@@ -789,7 +804,8 @@ target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 # These tests use exceptions.
 if(NOT KYTY_CLANG_CL)
 	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
-			virtual_memory_allocation_tests)
+			virtual_memory_allocation_tests embedded_fetch_index_tests
+			shader_batch_audit renderdoc_capture_request_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
 	endforeach()
 endif()
