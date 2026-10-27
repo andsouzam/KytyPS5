@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include "common/config.h"
 #include "common/switches.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterializationDiagnostics.h"
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS

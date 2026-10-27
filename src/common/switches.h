@@ -1,6 +1,8 @@
 #ifndef KYTY_COMMON_SWITCHES_H_
 #define KYTY_COMMON_SWITCHES_H_
 
+#include "common/config.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
