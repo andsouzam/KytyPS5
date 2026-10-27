@@ -35,6 +35,8 @@ void DebugNoteFlipAddress(uint64_t address);
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <fmt/format.h>
 #include <list>
 #include <thread>

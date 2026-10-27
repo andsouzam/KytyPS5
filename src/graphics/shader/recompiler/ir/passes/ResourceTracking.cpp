@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 #include <map>

@@ -8,6 +8,7 @@
 #include <array>
 #include <bit>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <unordered_map>
 #include <utility>

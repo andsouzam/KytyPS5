@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <deque>
 #include <limits>

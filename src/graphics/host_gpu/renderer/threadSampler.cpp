@@ -447,6 +447,7 @@ void StartThreadDumper() {
 
 namespace Libs::Graphics {
 
+void ReserveCoreForCurrentThread() {}
 void StartThreadSampler(const char* /*name*/) {}
 void StartThreadDumper() {}
 

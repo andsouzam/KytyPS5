@@ -2,6 +2,7 @@
 #include "common/switches.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
