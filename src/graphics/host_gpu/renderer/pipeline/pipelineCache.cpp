@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
+#include <filesystem>
 #include <future>
 #include <limits>
 #include <memory>
@@ -55,8 +56,10 @@
 #include <optional>
 #include <shared_mutex>
 #include <span>
+#include <SDL3/SDL.h>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
+#include <system_error>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -65,6 +68,17 @@
 namespace Libs::Graphics {
 
 namespace {
+std::filesystem::path PipelineCacheDirectory() {
+	// Cache files must follow the executable, not the shell/launcher working directory. In the
+	// desktop build the process may be started by a shortcut, a terminal, or an automation tool.
+	if (const char* base_path = SDL_GetBasePath(); base_path != nullptr) {
+		return std::filesystem::path(base_path) / "_PipelineCache";
+	}
+	std::error_code error;
+	const auto      current = std::filesystem::current_path(error);
+	return (error ? std::filesystem::path(".") : current) / "_PipelineCache";
+}
+
 namespace MatDiag = ShaderRecompiler::IR::MaterializationDiagnostics;
 struct MaterializationProfileBridge final {
   FunctionProfile::Scope& parent;
@@ -186,7 +200,8 @@ std::string DriverBinarySignature(const vk::PhysicalDeviceProperties& properties
 	std::copy_n(properties.pipelineCacheUUID.data(), host.uuid.size(), host.uuid.begin());
 	auto signature = DriverCachePolicy::BlobSignature(host, KYTY_SHADER_CACHE_KEY);
 	if (ShaderRecompiler::IR::VertexExplodeCheck().enabled) {
-		signature += "vtxexplode=1\n";
+		signature += fmt::format("vtxexplode=1:limit={:.9g}\n",
+		                         ShaderRecompiler::IR::VertexExplodeCheck().limit);
 	}
 	signature += ShaderRecompiler::IR::VertexTraceCacheSignature();
 	return signature;
@@ -214,10 +229,14 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
-	// GPU-written bytes fail the read instead of waiting for a readback (upstream reads them back
-	// through TryReadBufferBacking); the shader then keeps such reads on the GPU.
-	return !values.empty() &&
-	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(), values.size_bytes());
+	if (values.empty()) return false;
+	if (Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, values.data(), values.size_bytes())) {
+		return true;
+	}
+	// On the GPU thread, a descriptor read that depends on GPU-written bytes must be read back
+	// before specialization. TryReadBufferBacking refuses non-GPU threads, so speculative workers
+	// remain non-blocking while the owning thread can obtain the correct current value.
+	return Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
 
 // Guest memory never lives in the lowest megabyte. A walk through a null base there is on a
@@ -307,7 +326,7 @@ public:
 	}
 
 private:
-	static std::filesystem::path Path() { return std::filesystem::path("_PipelineCache") / "failed_shaders.txt"; }
+	static std::filesystem::path Path() { return PipelineCacheDirectory() / "failed_shaders.txt"; }
 	void Load() {
 		if (m_loaded) {
 			return;
@@ -1237,7 +1256,10 @@ struct PipelineCache::ProgramCache {
 		const uint32_t vs = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Vertex)]);
 		const uint32_t ps = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Pixel)]);
 		const uint32_t cs = static_cast<uint32_t>(counts[static_cast<size_t>(ShaderType::Compute)]);
-		const uint32_t total = vs + ps + cs;
+		uint32_t total = 0;
+		for (const auto count: counts) {
+			total += static_cast<uint32_t>(count);
+		}
 		constexpr uint32_t TotalBaseShaders = 1476;
 		const float pct = std::clamp((base_shaders * 100.0f) / static_cast<float>(TotalBaseShaders), 0.0f, 100.0f);
 
@@ -1649,12 +1671,12 @@ void PipelineCache::InitializeDriverCache() {
 	if (explode) {
 		PipelineCacheLog("Vulkan pipeline cache: KYTY_VTX_EXPLODE_CHECK uses its own files");
 	}
-	m_driver_cache_path = std::filesystem::path("_PipelineCache") / (cache_name + ".bin");
+	const auto cache_directory = PipelineCacheDirectory();
+	m_driver_cache_path = cache_directory / (cache_name + ".bin");
 	// Shard i > 0 is "<title>.<i>.bin". Without pipelineCreationCacheControl only shard 0 is used.
 	const auto shard_path = [&](uint32_t index) {
 		return index == 0 ? m_driver_cache_path
-		                  : std::filesystem::path("_PipelineCache") /
-		                        fmt::format("{}.{}.bin", cache_name, index);
+		                  : cache_directory / fmt::format("{}.{}.bin", cache_name, index);
 	};
 	const uint32_t max_shards =
 	    m_graphics.pipeline_creation_cache_control ? DriverPipelineCache::kMaxShards : 1;
@@ -1690,7 +1712,7 @@ void PipelineCache::InitializeDriverCache() {
 		}
 	}
 	// Check for a legacy or precompiled -core.bin cache to merge into the active cache
-	const auto core_path = std::filesystem::path("_PipelineCache") / (cache_name + "-core.bin");
+	const auto core_path = m_driver_cache_path.parent_path() / (cache_name + "-core.bin");
 	if (Common::File::IsFileExisting(core_path)) {
 		size_t core_loaded = 0;
 		auto core_cache = LoadDriverCacheShard(core_path, &core_loaded);
@@ -1708,7 +1730,7 @@ void PipelineCache::InitializeDriverCache() {
 			}
 			(void)WriteDriverCache();
 			const auto merged_core_path =
-			    std::filesystem::path("_PipelineCache") / (cache_name + "-core.bin.merged");
+			    m_driver_cache_path.parent_path() / (cache_name + "-core.bin.merged");
 			Common::File::RenameFile(core_path, merged_core_path);
 			PipelineCacheLog("Vulkan pipeline cache: saved merged cache to {} and archived core cache to {}",
 			                 Common::PathToString(m_driver_cache_write_path),

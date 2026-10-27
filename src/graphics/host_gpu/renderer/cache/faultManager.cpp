@@ -260,7 +260,10 @@ void FaultManager::ProcessExplodeLog() {
 	if (!m_explode_cleared) {
 		// Device-local memory starts undefined: clear the whole region once.
 		m_explode_cleared = true;
-		command.fillBuffer(m_fault_buffer.Handle(), ExplodeLogOffset, ExplodeLogSize, 0);
+		// Clear both the legacy explode log and the optional value-trace slots. The trace
+		// region uses atomic zero-to-one slot claims; leaving device-local bytes undefined can
+		// make every claim fail and silently produce empty trace records.
+		command.fillBuffer(m_fault_buffer.Handle(), ExplodeLogOffset, DiagnosticLogSize(), 0);
 		dependency.pBufferMemoryBarriers = &post_barrier;
 		command.pipelineBarrier2(dependency);
 		return;

@@ -748,6 +748,11 @@ add_executable(host_thread_tests EXCLUDE_FROM_ALL
 target_link_libraries(host_thread_tests common)
 target_include_directories(host_thread_tests PRIVATE ${inc_headers})
 
+add_executable(bone_palette_staging_policy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BonePaletteStagingPolicyTests.cpp"
+)
+target_include_directories(bone_palette_staging_policy_tests PRIVATE ${inc_headers})
+
 add_executable(image_page_table_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImagePageTableTests.cpp"
 )
@@ -823,6 +828,7 @@ if(BUILD_TESTING)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
+	add_test(NAME bone_palette_staging_policy COMMAND $<TARGET_FILE:bone_palette_staging_policy_tests>)
 	add_test(NAME safe_call_flags COMMAND $<TARGET_FILE:safe_call_flags_tests>)
 	set_tests_properties(safe_call_flags PROPERTIES TIMEOUT 10 RUN_SERIAL TRUE)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
@@ -1268,6 +1274,7 @@ if(BUILD_TESTING)
 	add_custom_target(kyty_tests DEPENDS
 		ime_dialog_tests
 		bindless_lifecycle_tests
+		bone_palette_staging_policy_tests
 		shader_writer_history_tests
 		shader_cfg_tests
 		embedded_fetch_index_tests

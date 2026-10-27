@@ -3,6 +3,7 @@
 #include "graphics/host_gpu/renderer/waitPollCausalDiagnostic.h"
 
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/bonePaletteStagingPolicy.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -1694,6 +1695,11 @@ void CopyReadableOrZero(uint64_t address, uint8_t* destination, uint64_t size) {
 
 static inline void SanitizeBonePaletteStaging(uint8_t* destination, uint64_t dst_offset_in_buffer,
                                               uint64_t copy_size, uint64_t buffer_size) {
+	// This game-specific data rewrite is an experiment, not emulated guest behavior. Keep it
+	// disabled unless a developer explicitly opts in for an A/B diagnostic run.
+	if (!BonePaletteStagingPolicy::Enabled(KYTY_GETENV("KYTY_GPU_PALETTE_SANITIZE"))) {
+		return;
+	}
 	if (buffer_size != 124224 && copy_size != 124224) {
 		return;
 	}

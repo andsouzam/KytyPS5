@@ -755,7 +755,6 @@ void WindowContext::Run() {
 	loop.need_exit = false;
 	loop.paused.store(false, std::memory_order_release);
 
-	double last_compile_title_update = 0.0;
 	while (!loop.need_exit) {
 		if (loop.paused.load(std::memory_order_acquire)) {
 			if (!timer.IsPaused()) {
@@ -766,25 +765,6 @@ void WindowContext::Run() {
 		}
 
 		const double now_s = timer.GetTimeS();
-		if (now_s - last_compile_title_update >= 0.5) {
-			last_compile_title_update = now_s;
-			const uint32_t active = g_shader_progress.active_compiles.load(std::memory_order_relaxed);
-			if (active > 0) {
-				const uint32_t base = g_shader_progress.base_shader_count.load(std::memory_order_relaxed);
-				const uint32_t pipes = g_shader_progress.total_pipelines.load(std::memory_order_relaxed);
-				const uint32_t elapsed = g_shader_progress.active_elapsed_s.load(std::memory_order_relaxed);
-				const uint64_t hash = g_shader_progress.active_hash.load(std::memory_order_relaxed);
-				constexpr uint32_t TotalBaseShaders = 1476;
-				const float pct = std::clamp((base * 100.0f) / static_cast<float>(TotalBaseShaders), 0.0f, 100.0f);
-				static char title_buf[128];
-				static bool has_title = Loader::SystemContentParamSfoGetString("TITLE", title_buf, sizeof(title_buf));
-				auto title_text = fmt::format(
-				    "[Compilando Shaders: {}/{} ({:.1f}%) | Pipelines: {} | CS {:016x} ({}s)] {} [KytyPS5]",
-				    base, TotalBaseShaders, pct, pipes, hash, elapsed, (has_title ? title_buf : "Ghost of Yotei"));
-				SDL_SetWindowTitle(window, title_text.c_str());
-			}
-		}
-
 		if (!HostInputWaitEvent(&loop.event)) {
 			continue;
 		}
@@ -1004,11 +984,16 @@ void WindowContext::UpdateTitle(bool new_frame) {
 	const auto* device_name = graphic_ctx.GetPhysicalDeviceProperties().deviceName.data();
 	const uint32_t base_sh = g_shader_progress.base_shader_count.load(std::memory_order_relaxed);
 	const uint32_t pipes_sh = g_shader_progress.total_pipelines.load(std::memory_order_relaxed);
-	constexpr uint32_t TotalBaseShaders = 1476;
-	const float shader_pct = std::clamp((base_sh * 100.0f) / static_cast<float>(TotalBaseShaders), 0.0f, 100.0f);
+	const uint32_t active_compiles = g_shader_progress.active_compiles.load(std::memory_order_relaxed);
+	const uint64_t active_hash = g_shader_progress.active_hash.load(std::memory_order_relaxed);
+	const uint32_t active_elapsed = g_shader_progress.active_elapsed_s.load(std::memory_order_relaxed);
+	const auto shader_status = active_compiles > 0
+	                               ? fmt::format(" | Compilando CS {:016x} ({}s, ativos: {})",
+	                                             active_hash, active_elapsed, active_compiles)
+	                               : std::string {};
 	auto        text        = fmt::format(
-	    "[Shaders: {}/{} ({:.1f}%) | Pipelines: {}] [{} | {}] {}{}{}{}[{}] [{}], frame: {}, game fps: {:.1f}",
-	    base_sh, TotalBaseShaders, shader_pct, pipes_sh,
+	    "[Shaders: {} | Pipelines: {}{}] [{} | {}] {}{}{}{}[{}] [{}], frame: {}, game fps: {:.1f}",
+	    base_sh, pipes_sh, shader_status,
 	    KYTY_BUILD_LABEL, build_type, (has_title ? title : ""), (has_title ? ", " : ""),
 	    (has_title_id ? title_id : ""), (has_title_id ? " " : ""), device_name, processor_name,
 	    frame_statistics.TotalFrames(), frame_statistics.FrameRate());

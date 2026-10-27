@@ -1,6 +1,41 @@
 # Ghost of Yōtei: active integration and session resume
 
-## Current checkpoint: DLSS actually evaluates and merges into the visible game world, 2026-10-15
+## Current checkpoint: GPU-built descriptor reads and real-game startup, 2026-10-25
+
+Branch `yotei-bringup`, source base `cba6167b` with local changes. The native
+`kyty_emulator` target builds. The bounded-loop proof now clears predecessor-
+dependent evaluation caches per incoming edge; `resource_tracking_tests.exe`
+passes, including the invalid loop-clobber cases. New regressions cover a
+lane-dependent address-loaded buffer descriptor and a loop-carried descriptor base.
+GPU-built buffer accesses now stay on the GPU when a descriptor dword is not
+host-evaluable and depends on a GPU memory read, or when its base/size contains a
+loop-carried Phi. The guard is limited to supported indirect accesses and the
+address/size words; it does not turn invalid stride/format-only values into a
+valid descriptor. Indirect image tables still reject mixed numeric classes,
+same-shape refreshes preserve output-vector storage, and captured specialization
+reads are exported for renderer overlap checks. `KYTY_GPU_PALETTE_SANITIZE` is
+now exact opt-in (`=1`); the normal launcher setting `=0` is honored. This removes
+an unconditional matrix heuristic but does not prove the underlying zero-bone
+matrix issue is fixed.
+
+Installed the newly built executable to `F:\KytyPS5-Windows-x64\kyty_emulator.exe`
+after preserving the previous runtime executable in `kyty_emulator.pre-bringup-20261025.exe`
+(and intermediate test builds as separate backups). A real Ghost of Yōtei run
+stayed alive for more than two minutes through shader precompile and continued
+submitting compute pipelines. The latest log reports 3,202 shader permutations
+replayed, `skipped 0`, and 765 compute pipelines queued; the earlier mass of
+`GetBufferResource dword 0 is not a valid runtime value` shader rejections and
+the fatal `d8959888aafd2552` translation failure no longer appear. Remaining diagnostics include heap-selected samplers
+using the default sampler and a bindless heap record that is not an image T#; no
+visual frame has been independently captured in this session. Full CTest was
+91% passing in the first broad run (18 failures, including unbuilt optional tests
+and remaining shader/materialization/kernel/GPU/cache failures); do not call the
+whole suite green or assume all failures are pre-existing. Next: visually
+inspect the live game window, capture the first stable scene/draw snapshots, and
+trace the zero bone matrices from producer to consumer before changing renderer
+semantics. Keep the executable backup, logs and caches; no push or public milestone.
+
+## Previous checkpoint: DLSS actually evaluates and merges into the visible game world, 2026-10-15
 
 Source0a02979a retires early-device startup, enables native host ASLR and keeps
 ordinary Memory-first initialization. CoreFED1A83B run200706/5b82c5 initializes

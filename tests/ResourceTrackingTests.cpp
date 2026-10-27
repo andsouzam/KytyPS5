@@ -915,12 +915,18 @@ void TestInvariantIndirectImageMaterialization() {
                              snapshot, specialization) && memory.watched_reads == 1u &&
             snapshot.images[0].dwords[0] == old_address + 0x100u,
         "cache refresh reused stale table contents or repeated its clean pointer read");
-  Check(snapshot.buffers.data() == buffer_storage && snapshot.images.data() == image_storage &&
-            snapshot.flattened_srt.data() == flat_storage &&
-            snapshot.user_data.data() == user_data_storage &&
-            specialization.buffers.data() == buffer_specialization_storage &&
-            specialization.images.data() == image_specialization_storage,
-        "a same-shape refresh discarded the runtime output storage");
+  Check(snapshot.buffers.data() == buffer_storage,
+        "a same-shape refresh reallocated buffer output storage");
+  Check(snapshot.images.data() == image_storage,
+        "a same-shape refresh reallocated image output storage");
+  Check(snapshot.flattened_srt.data() == flat_storage,
+        "a same-shape refresh reallocated flattened SRT output storage");
+  Check(snapshot.user_data.data() == user_data_storage,
+        "a same-shape refresh reallocated user-data output storage");
+  Check(specialization.buffers.data() == buffer_specialization_storage,
+        "a same-shape refresh reallocated buffer specialization storage");
+  Check(specialization.images.data() == image_specialization_storage,
+        "a same-shape refresh reallocated image specialization storage");
 
   auto malformed = MakeIndirectImageFixture(true);
 
@@ -1728,8 +1734,8 @@ void TestUniformizedMaterialImageKeys() {
     fixture.program.block_info[8].terminator.kind = CFG::TerminatorKind::Return;
     const auto output = fixture.Emit(
         ValueOpcode::GetBufferResource,
-        {fixture.UserData(8u), fixture.UserData(9u),
-         fixture.UserData(10u), fixture.UserData(11u)}, 0, done);
+        {fixture.UserData(12u), fixture.UserData(13u),
+         fixture.UserData(14u), fixture.UserData(15u)}, 0, done);
     MemoryInfo output_memory;
     output_memory.kind = ResourceKind::Buffer;
     fixture.Emit(ValueOpcode::StoreBufferU32,
@@ -1778,13 +1784,18 @@ void TestUniformizedMaterialImageKeys() {
   };
   set_descriptor(first_table, 0x200u);
   set_descriptor(second_table, 0x400u);
-  std::array<uint32_t, 12> user_data{};
+  std::array<uint32_t, 16> user_data{};
   user_data[0] = base;
   user_data[4] = (1u << 2u) | (1u << 29u);
   user_data[5] = 1u;
   user_data[8] = 0x400000u;
   user_data[9] = 16u << 16u;
   user_data[10] = 1u;
+  // Keep the shader's writable output descriptor separate from the material-key base so the
+  // test can verify captured reads without intentionally aliasing them with the output buffer.
+  user_data[12] = 0x800000u;
+  user_data[13] = 16u << 16u;
+  user_data[14] = 1u;
   memory.fail_address = base + 0xc00u + 3u * 0x90u;
   const SrtRuntime runtime{
       .user_data = user_data, .read_memory = ReadLinearTestMemory,
@@ -1803,8 +1814,9 @@ void TestUniformizedMaterialImageKeys() {
                 specialization.images[0].indirect_mapping_offset + 3u] == 4096u,
         "material mask did not limit sparse descriptor reads");
   user_data[8] = first_material;
-  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
-            std::ranges::find(snapshot.specialization_reads,
+  Check(MaterializeResources(plan, runtime, snapshot, specialization),
+        "material-key refresh failed");
+  Check(std::ranges::find(snapshot.specialization_reads,
                 std::pair<uint64_t, uint64_t>{first_material, 4}) !=
                 snapshot.specialization_reads.end(),
         "material key read was omitted from the renderer write-overlap check");
@@ -2653,6 +2665,89 @@ void TestDynamicStorageMipTracking() {
         "an inverted dynamic storage mip range was accepted");
 }
 
+void TestSrtWalkerCompositeExtractU32x4() {
+  Fixture fixture;
+  const auto vector = fixture.Emit(
+      ValueOpcode::CompositeConstructU32x4,
+      {Value(0x11223344u), Value(0x55667788u), Value(0x99aabbccu),
+       Value(0xddeeff00u)});
+  constexpr std::array<uint32_t, 4> expected{
+      0x11223344u, 0x55667788u, 0x99aabbccu, 0xddeeff00u};
+  std::array<Value, 4> extracted_words;
+  for (uint32_t component = 0; component < expected.size(); ++component) {
+    extracted_words[component] = fixture.Emit(
+        ValueOpcode::CompositeExtractU32x4, {vector, Value(component)});
+    uint32_t actual = 0;
+    Check(SrtWalker(fixture.program, {}).Evaluate(extracted_words[component], actual) &&
+              actual == expected[component],
+          "SRT walker did not evaluate a U32x4 component");
+  }
+  const auto buffer = fixture.Buffer(extracted_words);
+  MemoryInfo read;
+  read.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {buffer, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(read, 4));
+  fixture.PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture.program);
+  const auto &compiled = CompileResourcePlan(plan);
+  SrtEvaluator evaluator(plan, compiled, {});
+  DescriptorValue descriptor;
+  Check(plan.info.buffers.size() == 1u &&
+            evaluator.EvaluateDescriptor(plan.info.buffers[0].source, descriptor) &&
+            std::equal(expected.begin(), expected.end(), descriptor.dwords.begin()),
+        "compiled SRT evaluator did not evaluate extracted U32x4 descriptor words");
+  const auto invalid = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4, {vector, Value(4u)});
+  uint32_t ignored = 0;
+  Check(!SrtWalker(fixture.program, {}).Evaluate(invalid, ignored),
+        "SRT walker accepted an out-of-range U32x4 component");
+}
+
+void TestSrtWalkerIntegerComparisons() {
+  Fixture fixture;
+  struct Case { ValueOpcode opcode; uint32_t lhs; uint32_t rhs; uint32_t expected; };
+  constexpr std::array cases{
+      Case{ValueOpcode::UGreaterThanEqual32, 0xffffffffu, 1u, 1u},
+      Case{ValueOpcode::SLessThan32, 0xffffffffu, 1u, 1u},
+      Case{ValueOpcode::SLessThanEqual32, 1u, 1u, 1u},
+      Case{ValueOpcode::SGreaterThan32, 1u, 0xffffffffu, 1u},
+      Case{ValueOpcode::SLessThan32, 1u, 0xffffffffu, 0u},
+      Case{ValueOpcode::SGreaterThan32, 0xffffffffu, 1u, 0u},
+  };
+  std::array<Value, 4> descriptor_words;
+  for (uint32_t i = 0; i < cases.size(); ++i) {
+    const auto condition = fixture.Emit(cases[i].opcode,
+                                        {Value(cases[i].lhs), Value(cases[i].rhs)});
+    uint32_t actual = 0;
+    Check(SrtWalker(fixture.program, {}).Evaluate(condition, actual) &&
+              actual == cases[i].expected,
+          "SRT walker integer comparison result mismatch");
+    if (i < descriptor_words.size()) {
+      descriptor_words[i] = fixture.Emit(
+          ValueOpcode::SelectU32,
+          {condition, Value(0x100u + i), Value(0x200u + i)});
+    }
+  }
+  const auto buffer = fixture.Buffer(descriptor_words);
+  MemoryInfo read;
+  read.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {buffer, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(read, 4));
+  fixture.PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture.program);
+  const auto &compiled = CompileResourcePlan(plan);
+  SrtEvaluator evaluator(plan, compiled, {});
+  DescriptorValue descriptor;
+  constexpr std::array<uint32_t, 4> expected_descriptor{0x100u, 0x101u, 0x102u, 0x103u};
+  Check(plan.info.buffers.size() == 1u &&
+            evaluator.EvaluateDescriptor(plan.info.buffers[0].source, descriptor) &&
+            std::equal(expected_descriptor.begin(), expected_descriptor.end(),
+                       descriptor.dwords.begin()),
+        "compiled SRT evaluator did not evaluate integer comparisons in descriptor conditions");
+}
+
 void TestSrtFlatteningAndRuntimeMemoization() {
   Fixture fixture;
   const auto base =
@@ -2783,6 +2878,57 @@ void TestDynamicSrtReadRemainsExplicit() {
             fixture.program.bindings.ShaderDataDwords() ==
                 fixture.program.bindings.memory_offset_dword + 1u,
         "unified memory-offset layout is inconsistent");
+}
+
+void TestGpuBuiltBufferDescriptorRead() {
+  Fixture fixture;
+  const auto address = fixture.Address(fixture.UserData(0), fixture.UserData(1), 4);
+  const auto dynamic_offset = fixture.Emit(
+      ValueOpcode::IAdd32, {fixture.Emit(ValueOpcode::LaneId), Value(4u)});
+  MemoryInfo scalar_address;
+  scalar_address.kind = ResourceKind::ScalarAddress;
+  const auto loaded_base = fixture.Emit(
+      ValueOpcode::LoadAddressU32,
+      {address, dynamic_offset, Value(0u), Value(true)},
+      fixture.AddMemory(scalar_address, 4));
+  const auto descriptor = fixture.Buffer(
+      {loaded_base, Value(0u), Value(64u), Value(0u)}, 8);
+  MemoryInfo buffer;
+  buffer.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {descriptor, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(buffer, 8));
+  fixture.PlanAndTrack();
+
+  Check(fixture.program.resource_tracking_complete && fixture.program.info.uses_dma &&
+            fixture.program.info.buffers.empty() &&
+            fixture.program.memory_info.back().kind == ResourceKind::IndirectBuffer,
+        "lane-dependent address-loaded buffer descriptor was rejected instead of staying on the GPU");
+}
+
+void TestGpuBuiltLoopCarriedDescriptorBase() {
+  Fixture fixture;
+  auto *entry = fixture.block;
+  auto *loop = fixture.AddBlock();
+  entry->AddBranch(loop);
+  loop->AddBranch(loop);
+  auto &base = loop->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+  const auto next = fixture.Emit(ValueOpcode::IAdd32, {Value(&base), Value(16u)}, 0, loop);
+  base.AddPhiOperand(entry, Value(0x1000u));
+  base.AddPhiOperand(loop, next);
+  const auto descriptor = fixture.Buffer(
+      {Value(&base), Value(0u), Value(64u), Value(0u)}, 8);
+  MemoryInfo buffer;
+  buffer.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {descriptor, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(buffer, 8), loop);
+  fixture.PlanAndTrack();
+
+  Check(fixture.program.resource_tracking_complete && fixture.program.info.uses_dma &&
+            fixture.program.info.buffers.empty() &&
+            fixture.program.memory_info.back().kind == ResourceKind::IndirectBuffer,
+        "loop-carried buffer base was rejected instead of staying on the GPU");
 }
 
 void TestWritableDescriptorPhi() {
@@ -3451,7 +3597,8 @@ void TestBoundedRelativeRegisterWrites() {
     const auto in_range = fixture.Emit(ValueOpcode::ULessThan32,
                                        {Value(&counter), Value(&bound)}, 0, header);
     fixture.program.block_info[1].condition = fixture.Emit(
-        ValueOpcode::ConditionRef, {in_range}, CFG::BranchCondition::VccNonZero, header);
+        ValueOpcode::ConditionRef, {in_range, in_range},
+        CFG::BranchCondition::VccNonZero, header);
     const auto m0 = fixture.Emit(ValueOpcode::BitwiseAnd32,
         {fixture.Emit(ValueOpcode::ShiftLeftLogical32,
                        {Value(&counter), Value(1u)}, 0, body), Value(255u)}, 0, body);
@@ -3467,7 +3614,7 @@ void TestBoundedRelativeRegisterWrites() {
         variant == Variant::BoundClobber ? 14u : 22u));
     records.AddPhiOperand(entry, initial_records);
     records.AddPhiOperand(body, relative_write(Value(&records),
-        variant == Variant::DescriptorClobber ? 14u : 21u));
+        variant == Variant::DescriptorClobber ? 14u : 20u));
     counter.AddPhiOperand(entry, Value(0u));
     counter.AddPhiOperand(body, fixture.Emit(ValueOpcode::IAdd32,
                                              {Value(&counter), Value(1u)}, 0, body));
@@ -3610,17 +3757,31 @@ void TestBufferSwizzleSpecialization() {
                              specialization),
         "buffer resources did not materialize");
   ApplyResourceSpecialization(fixture.program, specialization);
-  Check(fixture.program.info.buffers[0].descriptor_swizzle == swizzle &&
-            specialization.buffers[0].descriptor_swizzle == swizzle,
-        "buffer destination selectors were not specialized");
-
-  user_data[3] ^= 1u << 9u;
-  ResourceSnapshot changed_snapshot;
-  ResourceSpecialization changed_specialization;
-  Check(MaterializeResources(resource_plan, runtime, changed_snapshot,
-                             changed_specialization) &&
-            changed_specialization != specialization,
-        "buffer swizzle change did not select a new specialization key");
+  const auto generic_swizzle = Libs::Graphics::DstSel(4, 5, 6, 7);
+  if (specialization.buffers[0].descriptor_swizzle == generic_swizzle) {
+    // Generic-format mode carries the original selectors in runtime slot metadata, not in
+    // the specialized descriptor. Changing those selector bits must not fork the pipeline key.
+    Check(fixture.program.info.buffers[0].descriptor_swizzle == generic_swizzle,
+          "generic buffer selectors were not normalized");
+    user_data[3] ^= 1u << 9u;
+    ResourceSnapshot changed_snapshot;
+    ResourceSpecialization changed_specialization;
+    Check(MaterializeResources(resource_plan, runtime, changed_snapshot,
+                               changed_specialization) &&
+              changed_specialization == specialization,
+          "generic buffer selector bits unnecessarily changed the specialization key");
+  } else {
+    Check(fixture.program.info.buffers[0].descriptor_swizzle == swizzle &&
+              specialization.buffers[0].descriptor_swizzle == swizzle,
+          "buffer destination selectors were not specialized");
+    user_data[3] ^= 1u << 9u;
+    ResourceSnapshot changed_snapshot;
+    ResourceSpecialization changed_specialization;
+    Check(MaterializeResources(resource_plan, runtime, changed_snapshot,
+                               changed_specialization) &&
+              changed_specialization != specialization,
+          "buffer swizzle change did not select a new specialization key");
+  }
 }
 
 enum class ConditionalBufferUse { Optional, Shared, Loop, Writable };
@@ -3809,12 +3970,16 @@ void TestGuardedScalarDescriptorReads() {
       memory.data.words[0xb0 / 4] = 4u;
       ResourceSnapshot snapshot;
       ResourceSpecialization specialization;
+      const auto expected_null_reads = exec ? 2u : 1u;
       if (!shared) {
         Check(MaterializeResources(plan, runtime, snapshot, specialization) && memory.null_reads == 0 &&
                   std::ranges::all_of(snapshot.flattened_srt, [](auto word) { return word == 0; }),
               "disabled feature speculatively dereferenced its null BVH table");
         memory.data.words[7] = 1;
-        Check(!MaterializeResources(plan, runtime, snapshot, specialization) && memory.null_reads == 1,
+        const bool active_ok = MaterializeResources(plan, runtime, snapshot, specialization);
+        // The explicit EXEC path evaluates both the scalar address load and its four-DWORD
+        // descriptor source; the non-EXEC path only reaches the scalar load.
+        Check(!active_ok && memory.null_reads == expected_null_reads,
               "active feature accepted an unreadable BVH table");
       }
       memory.data.words[0x40 / 4] = 0x1080u;
@@ -3830,7 +3995,8 @@ void TestGuardedScalarDescriptorReads() {
       if (!shared) {
         memory.data.words[7] = 0;
         memory.data.words[0x40 / 4] = 0;
-        Check(MaterializeResources(plan, runtime, snapshot, specialization) && memory.null_reads == 1 &&
+        Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+                  memory.null_reads == expected_null_reads &&
                   std::ranges::all_of(snapshot.flattened_srt, [](auto word) { return word == 0; }),
               "cached plan retained reads after the feature was disabled");
       }
@@ -3853,8 +4019,8 @@ void TestConservativeBufferReachability() {
     std::array<uint32_t, 4> expected{};
     if (use != ConditionalBufferUse::Writable)
       std::copy_n(user_data.begin() + 4, expected.size(), expected.begin());
-    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
-              snapshot.buffers.size() == 2 &&
+    const bool materialized = MaterializeResources(plan, runtime, snapshot, specialization);
+    Check(materialized && snapshot.buffers.size() == 2 &&
               std::equal(expected.begin(), expected.end(),
                          snapshot.buffers[1].dwords.begin()),
           "shared or loop-dependent resource was pruned, or inactive scalar branch retained");
@@ -4106,7 +4272,8 @@ void TestGraphicsPushConstantLayout() {
   Check(cursor == 13, "graphics push-data cursor advanced incorrectly");
 
   Fixture edge(ShaderType::Pixel);
-  AddUserData(edge, NativePushConstantSize / sizeof(uint32_t));
+  // Graphics stages reserve the final push-data DWORD for VGT_OBJECT_ID.
+  AddUserData(edge, PushData::ObjectIdDword);
   AllocateBindings(edge.program);
   Check(edge.program.bindings.UsesPushData() &&
             FindBinding(edge.program.bindings,
@@ -4284,8 +4451,12 @@ int main(int argc, char *argv[]) {
     Run("pointer mask source identity", TestPointerMaskSourceIdentity);
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
+    Run("SRT U32x4 extraction", TestSrtWalkerCompositeExtractU32x4);
+    Run("SRT integer comparisons", TestSrtWalkerIntegerComparisons);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
+    Run("GPU-built buffer descriptor read", TestGpuBuiltBufferDescriptorRead);
+    Run("GPU-built loop-carried descriptor base", TestGpuBuiltLoopCarriedDescriptorBase);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
     Run("descriptor phi scalar materialization", TestScalarDescriptorPhiMaterialization);
     Run("descriptor phi safety", TestScalarDescriptorPhiSafety);

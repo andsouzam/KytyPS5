@@ -627,10 +627,21 @@ void EmitVertexValueTrace(ValueEmitContext& ctx, uint32_t kind, uint32_t pc,
 	selected = and_bool(selected, Binary(state, spv::OpUGreaterThan, boolean, lo, zero));
 	selected = and_bool(selected, Binary(state, spv::OpULessThanEqual, boolean, lo,
 	                                      ConstantU32(state, IR::VertexTraceDrawSlots)));
-	selected = and_bool(selected, Binary(state, spv::OpIEqual, boolean, vertex,
-	                                      ConstantU32(state, IR::VertexValueTrace().vertex)));
-	selected = and_bool(selected, Binary(state, spv::OpIEqual, boolean, instance,
-	                                      ConstantU32(state, IR::VertexValueTrace().instance)));
+	if (IR::VertexValueTrace().vertex == UINT32_MAX) {
+		// Wildcard mode admits only invalid F32 expressions or Position exports whose
+		// predicate was restricted to a non-finite position by trace_position below.
+		const bool allowed_kind = kind == static_cast<uint32_t>(IR::VertexTraceKind::NonFinite) ||
+		                          kind == static_cast<uint32_t>(IR::VertexTraceKind::PreClip) ||
+		                          kind == static_cast<uint32_t>(IR::VertexTraceKind::PostClip);
+		selected = and_bool(selected, ConstantBool(state, allowed_kind));
+	} else {
+		selected = and_bool(selected, Binary(state, spv::OpIEqual, boolean, vertex,
+		                                      ConstantU32(state, IR::VertexValueTrace().vertex)));
+	}
+	if (IR::VertexValueTrace().instance != UINT32_MAX) {
+		selected = and_bool(selected, Binary(state, spv::OpIEqual, boolean, instance,
+		                                      ConstantU32(state, IR::VertexValueTrace().instance)));
+	}
 	const auto base = EmitBinaryU32(state, spv::OpIAdd,
 	    ConstantU32(state, IR::VertexTraceBaseWord),
 	    EmitBinaryU32(state, spv::OpIMul, EmitBinaryU32(state, spv::OpISub, lo, one),
@@ -1050,8 +1061,19 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 				state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), component, value, i);
 				payload[i] = Unary(state, spv::OpBitcast, TypeU32(state), component);
 			}
+			auto trace_predicate = exec;
+			if (IR::VertexValueTrace().vertex == UINT32_MAX) {
+				// Capture the actual vertex that exports a NaN/Inf Position, not an arbitrary
+				// vertex selected before the GPU-generated index buffer is finalized.
+				const auto booleans = TypeBoolVector(state, 4);
+				const auto non_finite = Unary(
+				    state, spv::OpAny, TypeBool(state),
+				    Binary(state, spv::OpLogicalOr, booleans, Unary(state, spv::OpIsNan, booleans, value),
+				           Unary(state, spv::OpIsInf, booleans, value)));
+				trace_predicate = Binary(state, spv::OpLogicalAnd, TypeBool(state), exec, non_finite);
+			}
 			EmitVertexValueTrace(ctx, static_cast<uint32_t>(kind), inst.Flags<IR::ExportFlags>().pc,
-			                     exec, 1, UINT32_MAX, UINT32_MAX, payload);
+			                     trace_predicate, 1, UINT32_MAX, UINT32_MAX, payload);
 		};
 		trace_position(IR::VertexTraceKind::PreClip);
 		if (exp.kind == IR::ExportTargetKind::Position &&
@@ -1073,14 +1095,28 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 			if (state.invalid_position_clip_distance != UINT32_MAX) {
 				const auto zero = state.builder.Constant(spv::OpConstantNull, TypeF32Vector(state, 4));
 				const auto equal = state.builder.AllocateId();
+				const auto zero_position = state.builder.AllocateId();
+				const auto is_nan = state.builder.AllocateId();
+				const auto is_inf = state.builder.AllocateId();
+				const auto non_finite_components = state.builder.AllocateId();
+				const auto non_finite = state.builder.AllocateId();
 				const auto invalid = state.builder.AllocateId();
 				const auto distance = state.builder.AllocateId();
 				const auto distance_pointer = state.builder.AllocateId();
 				state.builder.AddFunction(spv::OpFOrdEqual, TypeBoolVector(state, 4), equal,
 				                          value, zero);
-				state.builder.AddFunction(spv::OpAll, TypeBool(state), invalid, equal);
-				// Zero at valid vertices makes a primitive containing an invalid position
-				// collapse to its remaining edge, before the undefined 0/0 perspective divide.
+				state.builder.AddFunction(spv::OpAll, TypeBool(state), zero_position, equal);
+				state.builder.AddFunction(spv::OpIsNan, TypeBoolVector(state, 4), is_nan, value);
+				state.builder.AddFunction(spv::OpIsInf, TypeBoolVector(state, 4), is_inf, value);
+				state.builder.AddFunction(spv::OpLogicalOr, TypeBoolVector(state, 4),
+				                          non_finite_components, is_nan, is_inf);
+				state.builder.AddFunction(spv::OpAny, TypeBool(state), non_finite,
+				                          non_finite_components);
+				state.builder.AddFunction(spv::OpLogicalOr, TypeBool(state), invalid,
+				                          zero_position, non_finite);
+				// Zero and non-finite positions are invalid vertices. A negative clip distance
+				// makes a primitive containing one collapse to its remaining edge, avoiding
+				// undefined NaN/Inf clipping and the 0/0 perspective divide.
 				state.builder.AddFunction(spv::OpSelect, TypeF32(state), distance, invalid,
 				                          ConstantF32Value(state, -1.0f),
 				                          ConstantF32Value(state, 0.0f));

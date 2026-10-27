@@ -135,6 +135,9 @@ public:
 	bool Excludes(Value condition, bool positive) {
 		for (uint32_t incoming = 0; incoming < m_induction.NumArgs(); ++incoming) {
 			m_incoming = m_induction.PhiBlock(incoming);
+			// The non-current cache depends on which predecessor arm of header Phis
+			// is selected; never reuse those values across distinct incoming edges.
+			m_values[0].clear();
 			m_values[1].clear();
 			if (Evaluate(condition, true) != (positive ? 0u : 1u)) return false;
 		}
@@ -873,7 +876,8 @@ private:
 			for (auto& inst: *block) {
 				uint32_t index = 0;
 				if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 &&
-				    ScalarReadMemory(inst, index) != nullptr && inst.Arg(1).Resolve().IsImmediate() &&
+				    ScalarReadMemory(inst, index) != nullptr &&
+				    inst.Arg(1).Resolve().IsImmediate() &&
 				    ValidateRuntimeValue(m_program, Value(&inst)))
 					CollectScalarRead(Value(&inst), inst.Flags<MemoryFlags>().pc);
 			}
@@ -903,8 +907,21 @@ private:
 				if (same) break;
 			}
 			const bool keep = slot == m_program.srt_reads.size();
-			if (keep) m_program.srt_reads.push_back({Value(read), slot});
 			auto* block = read->Parent();
+			const auto block_it = std::ranges::find(m_program.blocks, block);
+			const auto block_index = block_it == m_program.blocks.end()
+			                             ? UINT32_MAX
+			                             : static_cast<uint32_t>(std::distance(m_program.blocks.begin(), block_it));
+			if (keep) {
+				m_program.srt_reads.push_back({Value(read), slot,
+				                              block_index == UINT32_MAX ? std::vector<uint32_t> {}
+				                                                        : std::vector<uint32_t> {block_index}});
+			} else if (block_index != UINT32_MAX) {
+				auto& block_indices = m_program.srt_reads[slot].block_indices;
+				if (std::ranges::find(block_indices, block_index) == block_indices.end()) {
+					block_indices.push_back(block_index);
+				}
+			}
 			auto& list = block->Instructions();
 			const auto where = std::ranges::find_if(list, [&](const Inst& inst) {
 				return &inst == read;
@@ -946,11 +963,10 @@ private:
 		m_program.srt_plan_complete = true;
 	}
 
-	// Whether a descriptor dword is built from a vector memory load. Such a value (a record count
-	// a previous dispatch wrote, read through a V#) exists only on the GPU when the dispatch runs:
-	// the host cannot evaluate it ahead of time (the bytes are GPU-written, and a readback would
-	// see them before that dispatch's producers ran).
-	bool DependsOnVectorLoad(Value value) const {
+	// Whether a descriptor dword depends on a GPU memory read. If it cannot be evaluated by the
+	// host (for example, a lane-dependent load or a loop-carried address), keep the descriptor in
+	// the shader and route supported accesses through the guest BDA path.
+	bool DependsOnGpuMemoryRead(Value value) const {
 		std::vector<const Inst*> pending;
 		std::unordered_set<const Inst*> visited;
 		if (const auto* first = value.Resolve().TryInstruction(); first != nullptr) {
@@ -962,8 +978,8 @@ private:
 			if (!visited.insert(inst).second) {
 				continue;
 			}
-			if (BufferAccessOf(inst->GetOpcode()) == BufferAccess::Read &&
-			    inst->GetOpcode() != ValueOpcode::ReadConstBuffer) {
+			if ((BufferAccessOf(inst->GetOpcode()) == BufferAccess::Read) ||
+			    inst->GetOpcode() == ValueOpcode::LoadAddressU32) {
 				return true;
 			}
 			for (size_t i = 0; i < inst->NumArgs(); i++) {
@@ -2766,6 +2782,60 @@ private:
 		}
 	}
 
+	bool HasLoopCarriedPhi(Value root) const {
+		std::vector<const Inst*> pending;
+		std::unordered_set<const Inst*> visited;
+		if (const auto* inst = root.Resolve().TryInstruction(); inst != nullptr) pending.push_back(inst);
+		while (!pending.empty()) {
+			const auto* inst = pending.back();
+			pending.pop_back();
+			if (!visited.insert(inst).second) continue;
+			if (inst->GetOpcode() == ValueOpcode::Phi &&
+			    ResolveInvariantPhi(m_program, Value(const_cast<Inst*>(inst))).IsEmpty()) {
+				std::vector<const Inst*> cycle_pending;
+				std::unordered_set<const Inst*> cycle_visited;
+				for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+					if (const auto* child = inst->Arg(arg).Resolve().TryInstruction(); child != nullptr)
+						cycle_pending.push_back(child);
+				}
+				while (!cycle_pending.empty()) {
+					const auto* child = cycle_pending.back();
+					cycle_pending.pop_back();
+					if (child == inst) return true;
+					if (!cycle_visited.insert(child).second) continue;
+					for (size_t arg = 0; arg < child->NumArgs(); ++arg) {
+						if (const auto* next = child->Arg(arg).Resolve().TryInstruction(); next != nullptr)
+							cycle_pending.push_back(next);
+					}
+				}
+			}
+			for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+				if (const auto* child = inst->Arg(arg).Resolve().TryInstruction(); child != nullptr)
+					pending.push_back(child);
+			}
+		}
+		return false;
+	}
+
+	bool HasRawMemoryRead(Value root) const {
+		std::vector<const Inst*> pending;
+		std::unordered_set<const Inst*> visited;
+		if (const auto* inst = root.Resolve().TryInstruction(); inst != nullptr) pending.push_back(inst);
+		while (!pending.empty()) {
+			const auto* inst = pending.back();
+			pending.pop_back();
+			if (!visited.insert(inst).second) continue;
+			const auto op = inst->GetOpcode();
+			if (op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer ||
+			    op == ValueOpcode::LoadBufferU32) return true;
+			for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+				if (const auto* child = inst->Arg(arg).Resolve().TryInstruction(); child != nullptr)
+					pending.push_back(child);
+			}
+		}
+		return false;
+	}
+
 	bool GetHandle(Value value, ValueOpcode expected, uint32_t width, uint32_t pc,
 	               uint32_t base_reg, Inst*& handle, uint32_t& source, bool sampler = false,
 	               bool sample_adjust = false) {
@@ -2780,6 +2850,14 @@ private:
 			if (expected == ValueOpcode::GetBufferResource &&
 			    std::all_of(descriptor.dwords.begin(), descriptor.dwords.begin() + width,
 			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
+				for (uint32_t dword = 0; dword < width; ++dword) {
+					const auto loop_phi = HasLoopCarriedPhi(descriptor.dwords[dword]);
+					const auto raw_read = HasRawMemoryRead(descriptor.dwords[dword]);
+					if (loop_phi || raw_read) {
+						Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
+						                     ValueOpcodeName(expected), dword));
+					}
+				}
 				return false;
 			}
 			// With --bindless: a sampler selected per material from a sampler heap (like the bindless
@@ -2821,9 +2899,10 @@ private:
 		}();
 		if (describe_hash != 0 && describe_hash == m_program.shader_hash) [[unlikely]] {
 			for (uint32_t dword = 0; dword < descriptor.dword_count && dword < 2u; dword++) {
-				std::printf("describe-handle: hash=%016llx pc=%x %s dword %u = %s\n",
+				const auto opcode_name = ValueOpcodeName(expected);
+				std::printf("describe-handle: hash=%016llx pc=%x %.*s dword %u = %s\n",
 				            static_cast<unsigned long long>(m_program.shader_hash), pc,
-				            ValueOpcodeName(expected), dword,
+				            static_cast<int>(opcode_name.size()), opcode_name.data(), dword,
 				            DescribeValue(descriptor.dwords[dword], 6).c_str());
 			}
 			std::fflush(stdout);
@@ -3041,14 +3120,19 @@ private:
 		if (buffer != BufferAccess::None) {
 			handle = inst.Arg(0).Resolve().TryInstruction();
 			const auto* indirect = handle == nullptr ? nullptr : FindIndirectDescriptor(*handle);
+			const auto expected_kind = op == ValueOpcode::ReadConstBuffer ? ResourceKind::ScalarBuffer
+			                                                                : ResourceKind::Buffer;
 			const bool  gpu_built =
 			    indirect == nullptr && handle != nullptr &&
 			    handle->GetOpcode() == ValueOpcode::GetBufferResource && handle->NumArgs() == 4u &&
-			    memory.kind == ResourceKind::Buffer &&
+			    memory.kind == expected_kind &&
 			    (memory.SupportsIndirectBufferLoad(op) || memory.SupportsIndirectBufferStore(op) ||
 			     memory.SupportsIndirectBufferAtomic(op)) &&
 			    std::ranges::any_of(std::array {0u, 1u, 2u, 3u}, [&](uint32_t dword) {
-				    return DependsOnVectorLoad(handle->Arg(dword));
+				    const auto value = handle->Arg(dword);
+				    if (ValidateRuntimeValue(m_program, value)) return false;
+				    return DependsOnGpuMemoryRead(value) ||
+				           (dword < 2u && HasLoopCarriedPhi(value));
 			    });
 			if (indirect != nullptr) {
 				source = indirect->source;

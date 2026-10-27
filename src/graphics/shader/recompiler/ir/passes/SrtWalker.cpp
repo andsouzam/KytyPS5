@@ -111,6 +111,8 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 		case ValueOpcode::CompositeExtractU64:
 		case ValueOpcode::CompositeConstructU32x2:
 		case ValueOpcode::CompositeExtractU32x2:
+		case ValueOpcode::CompositeConstructU32x4:
+		case ValueOpcode::CompositeExtractU32x4:
 		case ValueOpcode::BitFieldInsert:
 		case ValueOpcode::BitFieldUExtract:
 		case ValueOpcode::BitFieldSExtract:
@@ -139,9 +141,13 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 		case ValueOpcode::SelectF32:
 		case ValueOpcode::ULessThan32:
 		case ValueOpcode::ULessThanEqual32:
-		case ValueOpcode::IEqual32:
 		case ValueOpcode::UGreaterThan32:
+		case ValueOpcode::UGreaterThanEqual32:
+		case ValueOpcode::SLessThan32:
+		case ValueOpcode::SLessThanEqual32:
+		case ValueOpcode::SGreaterThan32:
 		case ValueOpcode::SGreaterThanEqual32:
+		case ValueOpcode::IEqual32:
 		case ValueOpcode::INotEqual32:
 		case ValueOpcode::LogicalOr:
 		case ValueOpcode::LogicalAnd:
@@ -304,13 +310,19 @@ private:
 			if (!index.IsImmediate() || index.GetType() != Type::U32 || index.U32() >= 2u) {
 				return finish(false);
 			}
-		} else if (op == ValueOpcode::CompositeExtractU32x2) {
+		} else if (op == ValueOpcode::CompositeExtractU32x2 ||
+		           op == ValueOpcode::CompositeExtractU32x4) {
 			const auto* source = inst->NumArgs() == 2 ? inst->Arg(0).ResolveInstruction() : nullptr;
 			const auto  index  = inst->NumArgs() == 2 ? inst->Arg(1).Resolve() : Value {};
+			const bool  is_x4  = op == ValueOpcode::CompositeExtractU32x4;
+			const auto  limit  = is_x4 ? 4u : 2u;
+			const auto  expected = is_x4 ? ValueOpcode::CompositeConstructU32x4
+			                            : ValueOpcode::CompositeConstructU32x2;
 			if (source == nullptr || !index.IsImmediate() || index.GetType() != Type::U32 ||
-			    index.U32() >= 2u ||
-			    (source->GetOpcode() != ValueOpcode::CompositeConstructU32x2 &&
-			     source->GetOpcode() != ValueOpcode::IAddCarry32)) {
+			    index.U32() >= limit ||
+			    (is_x4 ? source->GetOpcode() != expected
+			           : (source->GetOpcode() != expected &&
+			              source->GetOpcode() != ValueOpcode::IAddCarry32))) {
 				return finish(false);
 			}
 		}
@@ -444,7 +456,8 @@ bool SrtWalker::EvaluateExtract(const Inst& inst, uint64_t& result) {
 		return false;
 	}
 	const auto component = index.U32();
-	if (component >= 2u) {
+	const bool is_x4 = inst.GetOpcode() == ValueOpcode::CompositeExtractU32x4;
+	if (component >= (is_x4 ? 4u : 2u)) {
 		return false;
 	}
 	if (inst.GetOpcode() == ValueOpcode::CompositeExtractU64) {
@@ -459,7 +472,8 @@ bool SrtWalker::EvaluateExtract(const Inst& inst, uint64_t& result) {
 	if (source == nullptr) {
 		return false;
 	}
-	if (source->GetOpcode() == ValueOpcode::CompositeConstructU32x2) {
+	if (source->GetOpcode() == ValueOpcode::CompositeConstructU32x2 ||
+	    (is_x4 && source->GetOpcode() == ValueOpcode::CompositeConstructU32x4)) {
 		return EvaluateWide(source->Arg(component), result);
 	}
 	if (source->GetOpcode() == ValueOpcode::IAddCarry32) {
@@ -515,8 +529,19 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		if (immediate < 0) {
 			return false;
 		}
-		const auto byte_offset =
-		    (static_cast<uint64_t>(immediate) & ~uint64_t {3}) + (static_cast<uint32_t>(offset) & ~3u);
+		const auto immediate_offset = static_cast<uint64_t>(immediate) & ~uint64_t {3};
+		const auto relative_offset = static_cast<uint32_t>(offset) & ~3u;
+		// The guest offset components are DWORD offsets in a 32-bit address domain. Reject
+		// an overflowing sum instead of treating it as an ordinary out-of-range zero read.
+		if (relative_offset > UINT32_MAX - immediate_offset) {
+			return false;
+		}
+		const auto byte_offset = immediate_offset + relative_offset;
+		// A DWORD that starts near the end of the 32-bit address domain must not wrap when
+		// the four-byte read is formed, even if its starting offset itself fits in uint32_t.
+		if (byte_offset > static_cast<uint64_t>(UINT32_MAX) - (sizeof(uint32_t) - 1u)) {
+			return false;
+		}
 		const auto stride  = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
 		if (vector) {
 			// Only the uniform, unswizzled structured DWORD address is evaluated on the host.
@@ -531,10 +556,20 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
 		                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
 		if (byte_offset > size || size - byte_offset < sizeof(uint32_t)) {
-			// A scalar buffer read past num_records returns zero on the hardware ("reads return
-			// zero, writes ignored"), as the shader's own load does on the GPU.
-			result = 0;
-			return true;
+			if (KYTY_GETENV("KYTY_DEBUG_SRT_FAIL") != nullptr) {
+				std::printf("srt-oob: shader=0x%016llx opcode=%s base=0x%llx offset=0x%llx size=0x%llx records=0x%llx stride=0x%x\n",
+				            static_cast<unsigned long long>(m_program.shader_hash),
+				            ValueOpcodeName(inst.GetOpcode()).data(),
+				            static_cast<unsigned long long>(base),
+				            static_cast<unsigned long long>(byte_offset),
+				            static_cast<unsigned long long>(size),
+				            static_cast<unsigned long long>(records), stride);
+				std::fflush(stdout);
+			}
+			// The guest GPU load may return zero out of bounds, but host-side SRT evaluation must
+			// not silently specialize a descriptor from an invalid read. Decline the host walk;
+			// the normal GPU path retains the guest's own load semantics.
+			return false;
 		}
 		address = (base & ~uint64_t {3}) + byte_offset;
 	} else {
@@ -551,12 +586,8 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	void* const reader_userdata = m_runtime.userdata;
 	if (reader != nullptr) {
 		if (!reader(reader_userdata, address, {&word, 1})) {
-			// A load through a null base sits on a path the shader guards with a null-pointer
-			// test and never executes; its value cannot matter.
-			if (base == 0) {
-				result = 0;
-				return true;
-			}
+			// Failed reads are only harmless when control-flow analysis proves the load inactive.
+			// Treating every null-base failure as zero can silently accept an active bad pointer.
 			static std::atomic<uint32_t> reported {0};
 			if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
 				std::fprintf(stderr,
@@ -615,7 +646,8 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 		case ValueOpcode::BitCastU32F32:
 		case ValueOpcode::BitCastF32U32: return Arg(inst, 0, result);
 		case ValueOpcode::CompositeExtractU64:
-		case ValueOpcode::CompositeExtractU32x2: return EvaluateExtract(inst, result);
+		case ValueOpcode::CompositeExtractU32x2:
+		case ValueOpcode::CompositeExtractU32x4: return EvaluateExtract(inst, result);
 		case ValueOpcode::CompositeConstructU64:
 			if (!binary()) {
 				return false;
@@ -915,6 +947,33 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 				return true;
 			}
 			return false;
+		case ValueOpcode::UGreaterThanEqual32:
+			if (binary()) {
+				result = static_cast<uint32_t>(a) >= static_cast<uint32_t>(b);
+				return true;
+			}
+			return false;
+		case ValueOpcode::SLessThan32:
+			if (binary()) {
+				result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) <
+				         std::bit_cast<int32_t>(static_cast<uint32_t>(b));
+				return true;
+			}
+			return false;
+		case ValueOpcode::SLessThanEqual32:
+			if (binary()) {
+				result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) <=
+				         std::bit_cast<int32_t>(static_cast<uint32_t>(b));
+				return true;
+			}
+			return false;
+		case ValueOpcode::SGreaterThan32:
+			if (binary()) {
+				result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >
+				         std::bit_cast<int32_t>(static_cast<uint32_t>(b));
+				return true;
+			}
+			return false;
 		case ValueOpcode::SGreaterThanEqual32:
 			if (binary()) {
 				result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >=
@@ -972,6 +1031,61 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 	return true;
 }
 
+template <typename Evaluator>
+static bool EvaluateControlFlowCondition(Evaluator& evaluator, Value condition, uint32_t& result,
+                                        uint32_t depth = 0) {
+	condition = condition.Resolve();
+	if (depth >= 32u) return evaluator.Evaluate(condition, result);
+	const auto* inst = condition.TryInstruction();
+	if (inst != nullptr && inst->GetOpcode() == ValueOpcode::LogicalAnd) {
+		uint32_t left = 0, right = 0;
+		const bool left_valid = EvaluateControlFlowCondition(evaluator, inst->Arg(0), left, depth + 1u);
+		if (left_valid && left == 0u) { result = 0u; return true; }
+		const bool right_valid = EvaluateControlFlowCondition(evaluator, inst->Arg(1), right, depth + 1u);
+		if (right_valid && right == 0u) { result = 0u; return true; }
+		if (left_valid && right_valid) { result = left != 0u && right != 0u; return true; }
+		return false;
+	}
+	if (inst != nullptr && inst->GetOpcode() == ValueOpcode::LogicalOr) {
+		uint32_t left = 0, right = 0;
+		const bool left_valid = EvaluateControlFlowCondition(evaluator, inst->Arg(0), left, depth + 1u);
+		if (left_valid && left != 0u) { result = 1u; return true; }
+		const bool right_valid = EvaluateControlFlowCondition(evaluator, inst->Arg(1), right, depth + 1u);
+		if (right_valid && right != 0u) { result = 1u; return true; }
+		if (left_valid && right_valid) { result = 0u; return true; }
+		return false;
+	}
+	return evaluator.Evaluate(condition, result);
+}
+
+template <typename Evaluator>
+static bool EvaluateCompiledControlFlowCondition(const CompiledResourcePlan& compiled,
+                                                 Evaluator& evaluator, uint32_t node,
+                                                 uint32_t& result, uint32_t depth = 0) {
+	if (node == ResourceNode::NoNode) return false;
+	if (depth >= 32u) return evaluator.Evaluate(node, result);
+	const auto& value = compiled.nodes[node];
+	if (value.op == ResourceNode::Op::LogicalAnd) {
+		uint32_t left = 0, right = 0;
+		const bool left_valid = EvaluateCompiledControlFlowCondition(compiled, evaluator, value.args[0], left, depth + 1u);
+		if (left_valid && left == 0u) { result = 0u; return true; }
+		const bool right_valid = EvaluateCompiledControlFlowCondition(compiled, evaluator, value.args[1], right, depth + 1u);
+		if (right_valid && right == 0u) { result = 0u; return true; }
+		if (left_valid && right_valid) { result = left != 0u && right != 0u; return true; }
+		return false;
+	}
+	if (value.op == ResourceNode::Op::LogicalOr) {
+		uint32_t left = 0, right = 0;
+		const bool left_valid = EvaluateCompiledControlFlowCondition(compiled, evaluator, value.args[0], left, depth + 1u);
+		if (left_valid && left != 0u) { result = 1u; return true; }
+		const bool right_valid = EvaluateCompiledControlFlowCondition(compiled, evaluator, value.args[1], right, depth + 1u);
+		if (right_valid && right != 0u) { result = 1u; return true; }
+		if (left_valid && right_valid) { result = 0u; return true; }
+		return false;
+	}
+	return evaluator.Evaluate(node, result);
+}
+
 std::span<const uint8_t> SrtWalker::FindActiveSources() {
 	if (m_program.control_flow.empty()) {
 		return {};
@@ -1005,7 +1119,7 @@ std::span<const uint8_t> SrtWalker::FindActiveSources() {
 		uint32_t condition = 0;
 		auto&    evaluator = index < direct.size() && direct[index] != 0u ? *this : strict;
 		if (!block.condition.IsEmpty() && m_runtime.read_specialization_memory != nullptr &&
-		    evaluator.Evaluate(block.condition, condition)) {
+		    EvaluateControlFlowCondition(evaluator, block.condition, condition)) {
 			pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
 		} else {
 			pending.insert(pending.end(), block.successors.begin(), block.successors.end());
@@ -1019,14 +1133,58 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		return false;
 	}
 	flat.resize(m_program.srt_reads.size());
-	for (const auto& read: m_program.srt_reads) {
+	auto& active_reads = m_program.ThreadScratch().active_srt_reads;
+	active_reads.assign(m_program.srt_reads.size(), 0u);
+	const auto& visited_blocks = m_program.ThreadScratch().visited_blocks;
+	if (m_runtime.read_specialization_memory != nullptr &&
+	    visited_blocks.size() == m_program.control_flow.size()) {
+		for (uint32_t block = 0; block < m_program.control_flow.size(); ++block) {
+			for (const auto slot: m_program.control_flow[block].srt_reads) {
+				if (slot >= active_reads.size()) continue;
+				if (visited_blocks[block] != 0u) active_reads[slot] = 2u;
+				else if (active_reads[slot] == 0u) active_reads[slot] = 1u;
+			}
+		}
+	}
+	for (uint32_t slot = 0; slot < m_program.srt_reads.size(); ++slot) {
+		const auto& read = m_program.srt_reads[slot];
+		if (active_reads[slot] == 1u) {
+			if (read.flat_offset >= flat.size()) return false;
+			flat[read.flat_offset] = 0u;
+			continue;
+		}
 		const bool clean = read.flat_offset < m_clean_flat_slots.size() &&
 		                   m_clean_flat_slots[read.flat_offset] != 0u;
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr)) {
 			return false;
 		}
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
-		if (read.flat_offset >= flat.size() || !evaluator.Evaluate(read.value, flat[read.flat_offset])) {
+		if (read.flat_offset >= flat.size()) return false;
+		bool evaluated = evaluator.Evaluate(read.value, flat[read.flat_offset]);
+		// The strict clean reader avoids readback when backing bytes are CPU-clean. If they are
+		// GPU-dirty, retry on the owning evaluator: its GPU-thread reader can perform the required
+		// synchronized readback instead of dropping the entire draw/dispatch.
+		if (!evaluated && clean && m_clean_evaluator != nullptr && m_runtime.read_memory != nullptr) {
+			evaluated = Evaluate(read.value, flat[read.flat_offset]);
+		}
+		if (!evaluated) {
+			static const bool report = KYTY_GETENV("KYTY_DEBUG_SRT_FAIL") != nullptr;
+			static std::atomic<uint32_t> reported {0};
+			if (report && reported.fetch_add(1, std::memory_order_relaxed) < 32u) {
+				const auto* instruction = read.value.ResolveInstruction();
+				if (instruction != nullptr) {
+					const auto name = ValueOpcodeName(instruction->GetOpcode());
+					std::printf("flat-read-fail: shader=0x%016llx slot=%u flat=%u opcode=%.*s args=%zu clean=%u\n",
+					            static_cast<unsigned long long>(m_program.shader_hash), slot,
+					            read.flat_offset, static_cast<int>(name.size()), name.data(),
+					            instruction->NumArgs(), clean ? 1u : 0u);
+				} else {
+					std::printf("flat-read-fail: shader=0x%016llx slot=%u flat=%u opcode=immediate clean=%u\n",
+					            static_cast<unsigned long long>(m_program.shader_hash), slot,
+					            read.flat_offset, clean ? 1u : 0u);
+				}
+				std::fflush(stdout);
+			}
 			return false;
 		}
 	}
@@ -1081,6 +1239,10 @@ NodeOp ArithmeticOp(ValueOpcode op, size_t& args) {
 		case ValueOpcode::ULessThan32: return NodeOp::ULessThan32;
 		case ValueOpcode::ULessThanEqual32: return NodeOp::ULessThanEqual32;
 		case ValueOpcode::UGreaterThan32: return NodeOp::UGreaterThan32;
+		case ValueOpcode::UGreaterThanEqual32: return NodeOp::UGreaterThanEqual32;
+		case ValueOpcode::SLessThan32: return NodeOp::SLessThan32;
+		case ValueOpcode::SLessThanEqual32: return NodeOp::SLessThanEqual32;
+		case ValueOpcode::SGreaterThan32: return NodeOp::SGreaterThan32;
 		case ValueOpcode::SGreaterThanEqual32: return NodeOp::SGreaterThanEqual32;
 		case ValueOpcode::LogicalAnd: return NodeOp::LogicalAnd;
 		case ValueOpcode::LogicalOr: return NodeOp::LogicalOr;
@@ -1197,7 +1359,8 @@ private:
 				node.op      = NodeOp::Forward;
 				return node;
 			case ValueOpcode::CompositeExtractU64:
-			case ValueOpcode::CompositeExtractU32x2: return BuildExtract(inst);
+			case ValueOpcode::CompositeExtractU32x2:
+			case ValueOpcode::CompositeExtractU32x4: return BuildExtract(inst);
 			case ValueOpcode::ReadConst: {
 				if (inst.NumArgs() < 2) {
 					return node;
@@ -1217,7 +1380,8 @@ private:
 				return node;
 			}
 			case ValueOpcode::LoadAddressU32:
-			case ValueOpcode::ReadConstBuffer: return BuildRawRead(inst);
+			case ValueOpcode::ReadConstBuffer:
+			case ValueOpcode::LoadBufferU32: return BuildRawRead(inst);
 			default: break;
 		}
 		size_t     count      = 0;
@@ -1248,7 +1412,9 @@ private:
 			return node;
 		}
 		const auto index = inst.Arg(1).Resolve();
-		if (!index.IsImmediate() || index.GetType() != Type::U32 || index.U32() >= 2u) {
+		const bool is_x4 = inst.GetOpcode() == ValueOpcode::CompositeExtractU32x4;
+		if (!index.IsImmediate() || index.GetType() != Type::U32 ||
+		    index.U32() >= (is_x4 ? 4u : 2u)) {
 			return node;
 		}
 		node.aux = index.U32();
@@ -1261,7 +1427,8 @@ private:
 		if (source == nullptr) {
 			return node;
 		}
-		if (source->GetOpcode() == ValueOpcode::CompositeConstructU32x2 &&
+		if ((source->GetOpcode() == ValueOpcode::CompositeConstructU32x2 ||
+		     (is_x4 && source->GetOpcode() == ValueOpcode::CompositeConstructU32x4)) &&
 		    source->NumArgs() > node.aux) {
 			node.args[0] = Node(source->Arg(node.aux));
 			node.op      = NodeOp::Forward;
@@ -1287,10 +1454,20 @@ private:
 		node.args[0] = Node(handle->Arg(0));
 		node.args[1] = Node(handle->Arg(1));
 		node.args[2] = Node(inst.Arg(1));
-		if (inst.GetOpcode() == ValueOpcode::ReadConstBuffer) {
+		if (inst.GetOpcode() == ValueOpcode::ReadConstBuffer ||
+		    inst.GetOpcode() == ValueOpcode::LoadBufferU32) {
 			if (handle->NumArgs() == 4u) {
 				node.args[3] = Node(handle->Arg(2));
 				node.args[4] = Node(handle->Arg(3));
+			}
+			if (inst.GetOpcode() == ValueOpcode::LoadBufferU32) {
+				if (inst.NumArgs() < 5u) {
+					return node;
+				}
+				const auto guard = inst.Arg(4).Resolve();
+				node.flags       = ResourceNode::VectorBuffer |
+				                   (guard.IsImmediate() ? ResourceNode::ImmediateGuard : 0u);
+				node.aux         = guard.IsEmpty() ? ResourceNode::NoNode : Node(guard);
 			}
 			node.op = NodeOp::RawBuffer;
 		} else {
@@ -1679,6 +1856,10 @@ bool SrtEvaluator::EvaluateWide(uint32_t index, uint64_t& result) {
 	if (node.op == NodeOp::Fail) {
 		return false;
 	}
+	if (m_active_mask != ResourceNode::NoNode && index == m_active_mask) {
+		result = 1u;
+		return true;
+	}
 	if (m_active_mask != ResourceNode::NoNode && node.op == NodeOp::Select &&
 	    node.args[0] == m_active_mask) {
 		return EvaluateWide(node.args[1], result);
@@ -1693,8 +1874,13 @@ bool SrtEvaluator::EvaluateWide(uint32_t index, uint64_t& result) {
 		return false;
 	}
 	memo.generation = m_generation | 1u;
-	uint64_t out    = 0;
-	if (!EvaluateInst(node, out)) {
+	uint64_t   out  = 0;
+	const bool evaluated =
+	    (node.op == NodeOp::RawBuffer && (node.flags & ResourceNode::VectorBuffer) != 0u &&
+	     m_clean_evaluator != nullptr && m_clean_evaluator->m_active_mask == m_active_mask)
+	        ? m_clean_evaluator->EvaluateWide(index, out)
+	        : EvaluateInst(node, out);
+	if (!evaluated) {
 		memo.generation = 0;
 		return false;
 	}
@@ -1705,6 +1891,19 @@ bool SrtEvaluator::EvaluateWide(uint32_t index, uint64_t& result) {
 }
 
 bool SrtEvaluator::EvaluateRawRead(const ResourceNode& node, uint64_t& result) {
+	const bool vector =
+	    node.op == NodeOp::RawBuffer && (node.flags & ResourceNode::VectorBuffer) != 0u;
+	if (vector &&
+	    ((node.flags & ResourceNode::ImmediateGuard) != 0u || node.aux != m_active_mask)) {
+		uint64_t enabled = 0;
+		if (node.aux == ResourceNode::NoNode || !EvaluateWide(node.aux, enabled)) {
+			return false;
+		}
+		if (enabled == 0u) {
+			result = 0u;
+			return true;
+		}
+	}
 	uint64_t low    = 0;
 	uint64_t high   = 0;
 	uint64_t offset = 0;
@@ -1725,17 +1924,41 @@ bool SrtEvaluator::EvaluateRawRead(const ResourceNode& node, uint64_t& result) {
 		if (immediate < 0) {
 			return false;
 		}
-		const auto byte_offset =
-		    static_cast<uint64_t>(immediate) + static_cast<uint32_t>(offset);
-		const auto aligned = byte_offset & ~uint64_t {3};
-		const auto stride  = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		const auto immediate_offset = static_cast<uint64_t>(immediate) & ~uint64_t {3};
+		const auto relative_offset  = static_cast<uint32_t>(offset) & ~3u;
+		if (relative_offset > UINT32_MAX - immediate_offset) {
+			return false;
+		}
+		const auto byte_offset = immediate_offset + relative_offset;
+		if (byte_offset > static_cast<uint64_t>(UINT32_MAX) - (sizeof(uint32_t) - 1u)) {
+			return false;
+		}
+		const auto stride = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		if (vector) {
+			if ((high & (1u << 31u)) != 0u || (word3 & ((1u << 23u) | 0xf0000000u)) != 0u) {
+				return false;
+			}
+			if (stride == 0u || records == 0u || ((word3 >> 12u) & 0x7fu) == 0u) {
+				result = 0u;
+				return true;
+			}
+		}
 		const auto size = stride == 0u
 		                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
 		                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
-		if (aligned > size || size - aligned < sizeof(uint32_t)) {
+		if (byte_offset > size || size - byte_offset < sizeof(uint32_t)) {
+			if (KYTY_GETENV("KYTY_DEBUG_SRT_FAIL") != nullptr) {
+				std::printf("srt-node-oob: shader=0x%016llx base=0x%llx offset=0x%llx size=0x%llx records=0x%llx stride=0x%x\n",
+				            static_cast<unsigned long long>(m_program.shader_hash),
+				            static_cast<unsigned long long>(base),
+				            static_cast<unsigned long long>(byte_offset),
+				            static_cast<unsigned long long>(size),
+				            static_cast<unsigned long long>(records), stride);
+				std::fflush(stdout);
+			}
 			return false;
 		}
-		address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
+		address = (base & ~uint64_t {3}) + byte_offset;
 	} else {
 		const auto relative = (immediate & ~int64_t {3}) +
 		                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
@@ -1749,6 +1972,13 @@ bool SrtEvaluator::EvaluateRawRead(const ResourceNode& node, uint64_t& result) {
 			return false;
 		}
 	} else {
+		if (vector) {
+			return false;
+		}
+		if (address < NullPageLimit) {
+			result = 0u;
+			return true;
+		}
 		std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
 	}
 	result = word;
@@ -1789,6 +2019,9 @@ bool SrtEvaluator::EvaluateInst(const ResourceNode& node, uint64_t& result) {
 			}
 			return EvaluateWide(node.args[0], result);
 		case NodeOp::ReadFirstLane: {
+			if (m_active_mask != ResourceNode::NoNode && node.args[1] == m_active_mask) {
+				return EvaluateWide(node.args[0], result);
+			}
 			const auto   clean_runtime = CleanRuntime(m_runtime);
 			SrtEvaluator clean_active(m_program, m_compiled, clean_runtime, false, nullptr,
 			                          node.args[1]);
@@ -2006,6 +2239,22 @@ bool SrtEvaluator::EvaluateInst(const ResourceNode& node, uint64_t& result) {
 			if (!binary()) return false;
 			result = static_cast<uint32_t>(a) > static_cast<uint32_t>(b);
 			return true;
+		case NodeOp::UGreaterThanEqual32:
+			if (!binary()) return false;
+			result = static_cast<uint32_t>(a) >= static_cast<uint32_t>(b);
+			return true;
+		case NodeOp::SLessThan32:
+			if (!binary()) return false;
+			result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) < std::bit_cast<int32_t>(static_cast<uint32_t>(b));
+			return true;
+		case NodeOp::SLessThanEqual32:
+			if (!binary()) return false;
+			result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) <= std::bit_cast<int32_t>(static_cast<uint32_t>(b));
+			return true;
+		case NodeOp::SGreaterThan32:
+			if (!binary()) return false;
+			result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) > std::bit_cast<int32_t>(static_cast<uint32_t>(b));
+			return true;
 		case NodeOp::SGreaterThanEqual32:
 			if (!binary()) return false;
 			result = std::bit_cast<int32_t>(static_cast<uint32_t>(a)) >=
@@ -2062,7 +2311,8 @@ std::span<const uint8_t> SrtEvaluator::FindActiveSources() {
 	const auto outcome   = [&](uint32_t index) -> uint8_t {
 		uint32_t condition = 0;
 		auto&    evaluator = m_compiled.direct_conditions[index] != 0u ? *this : strict;
-		if (!evaluator.Evaluate(m_compiled.conditions[index], condition)) {
+		if (!EvaluateCompiledControlFlowCondition(m_compiled, evaluator,
+		                                          m_compiled.conditions[index], condition)) {
 			return 2u;
 		}
 		return condition != 0u ? 1u : 0u;
@@ -2075,14 +2325,40 @@ std::span<const uint8_t> SrtEvaluator::FindActiveSources() {
 	auto& tree     = m_program.ThreadScratch().active_tree;
 	auto& trace    = m_program.ThreadScratch().active_trace;
 	if (evaluates && !tree.empty()) {
+		const auto block_count = m_program.control_flow.size();
+		std::vector<uint8_t> cached_outcomes(block_count, 2u);
 		uint32_t node = 0;
 		while (node != TreeNode::None && tree[node].block != TreeNode::None) {
-			node = tree[node].next[outcome(tree[node].block)];
+			const auto block = tree[node].block;
+			const auto result = outcome(block);
+			cached_outcomes[block] = result;
+			node = tree[node].next[result];
 		}
 		if (node != TreeNode::None && tree[node].sources != TreeNode::None) {
 			const auto first = m_program.ThreadScratch().active_tree_sources.begin() + tree[node].sources;
 			const auto count = static_cast<ptrdiff_t>(m_program.descriptor_sources.size());
 			active.assign(first, first + count);
+			// The source cache is also used to decide which flattened reads are safe to
+			// evaluate. Replay the CFG with cached branch outcomes so that the visited-block
+			// set is current even when the learned source tree takes this fast path.
+			auto& visited = m_program.ThreadScratch().visited_blocks;
+			auto& pending = m_program.ThreadScratch().pending_blocks;
+			visited.assign(block_count, 0u);
+			pending.clear();
+			pending.push_back(0u);
+			while (!pending.empty()) {
+				const auto index = pending.back();
+				pending.pop_back();
+				if (visited[index] != 0u) continue;
+				visited[index] = 1u;
+				const auto& block = m_program.control_flow[index];
+				const auto result = cached_outcomes[index];
+				if (!block.condition.IsEmpty() && result != 2u) {
+					pending.push_back(block.successors[result != 0u ? 0u : 1u]);
+				} else {
+					pending.insert(pending.end(), block.successors.begin(), block.successors.end());
+				}
+			}
 			return active;
 		}
 	}
@@ -2103,9 +2379,7 @@ std::span<const uint8_t> SrtEvaluator::FindActiveSources() {
 	// Most plans have at most 64 blocks; track those in a mask instead of clearing a vector.
 	const bool small       = block_count <= 64u;
 	uint64_t   visited_mask = 0;
-	if (!small) {
-		visited.assign(block_count, 0u);
-	}
+	visited.assign(block_count, 0u);
 	pending.clear();
 	pending.push_back(0u);
 	while (!pending.empty()) {
@@ -2118,6 +2392,7 @@ std::span<const uint8_t> SrtEvaluator::FindActiveSources() {
 				continue;
 			}
 			visited_mask |= bit;
+			visited[index] = 1u;
 		} else {
 			if (visited[index]) {
 				continue;
@@ -2230,9 +2505,28 @@ bool SrtEvaluator::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		return ReportSrtRefreshFailure(m_program, "plan incomplete", 0);
 	}
 	flat.resize(m_program.srt_reads.size());
+	// Reads that belong only to unreachable blocks must stay zero in the flattened buffer. A
+	// speculative host read can dereference a null table even though the shader never takes that
+	// branch. State 0 means unassociated, 1 means inactive, and 2 means active in at least one block.
+	auto& active_reads = m_program.ThreadScratch().active_srt_reads;
+	active_reads.assign(m_program.srt_reads.size(), 0u);
+	const auto& visited_blocks = m_program.ThreadScratch().visited_blocks;
+	if (m_runtime.read_specialization_memory != nullptr &&
+	    visited_blocks.size() == m_program.control_flow.size()) {
+		for (uint32_t block = 0; block < m_program.control_flow.size(); ++block) {
+			for (const auto slot: m_program.control_flow[block].srt_reads) {
+				if (slot >= active_reads.size()) continue;
+				if (visited_blocks[block] != 0u) active_reads[slot] = 2u;
+				else if (active_reads[slot] == 0u) active_reads[slot] = 1u;
+			}
+		}
+	}
+	// Bulk reads cannot cross an inactive slot: fall back to per-slot evaluation for this refresh.
+	const bool has_inactive_reads = std::ranges::find(active_reads, uint8_t {1u}) != active_reads.end();
 	// Run slots are ordinary: this walker evaluates them. A run that cannot be read whole
 	// evaluates its slots one by one, and fails exactly as that would.
-	const bool runs = !m_compiled.flat_runs.empty() && m_active_mask == ResourceNode::NoNode;
+	const bool runs = !has_inactive_reads && !m_compiled.flat_runs.empty() &&
+	                  m_active_mask == ResourceNode::NoNode;
 	for (uint32_t run = 0; runs && run < m_compiled.flat_runs.size(); run++) {
 		const auto& info = m_compiled.flat_runs[run];
 		if (ReadFlatRun(info, flat)) {
@@ -2255,6 +2549,11 @@ bool SrtEvaluator::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			continue;
 		}
 		const auto offset = m_program.srt_reads[slot].flat_offset;
+		if (active_reads[slot] == 1u) {
+			if (offset >= flat.size()) return ReportSrtRefreshFailure(m_program, "inactive slot out of range", slot);
+			flat[offset] = 0u;
+			continue;
+		}
 		const bool clean  = m_clean_flat_slots && offset < m_compiled.clean_slots.size() &&
 		                   m_compiled.clean_slots[offset] != 0u;
 		if (clean &&
@@ -2262,7 +2561,14 @@ bool SrtEvaluator::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			return ReportSrtRefreshFailure(m_program, "no clean reader", slot);
 		}
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
-		if (offset >= flat.size() || !evaluator.Evaluate(m_compiled.slots[slot], flat[offset])) {
+		if (offset >= flat.size()) return ReportSrtRefreshFailure(m_program, "slot out of range", slot);
+		bool evaluated = evaluator.Evaluate(m_compiled.slots[slot], flat[offset]);
+		// Prefer the strict clean reader, but GPU-dirty backing is not a missing resource. Retry
+		// on the owning evaluator so its GPU-thread reader can synchronize/read back those bytes.
+		if (!evaluated && clean && m_clean_evaluator != nullptr && m_runtime.read_memory != nullptr) {
+			evaluated = Evaluate(m_compiled.slots[slot], flat[offset]);
+		}
+		if (!evaluated) {
 			static std::atomic<uint32_t> described {0};
 			if (KYTY_GETENV("KYTY_DEBUG_SRT_FAIL") != nullptr &&
 			    described.fetch_add(1, std::memory_order_relaxed) < 6u) {

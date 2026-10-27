@@ -1,5 +1,46 @@
 # Integration test debt
 
+## GPU-built buffer descriptors and first live Yōtei retry, 2026-10-25
+
+`LoopBoundProof::Excludes` now clears the non-current and current predecessor
+caches for each incoming edge. `resource_tracking_tests.exe` passes again,
+including `bounded relative register writes` and the invalid loop-clobber
+neighbors. Two new tests verify that a lane-dependent address-loaded buffer
+base and a loop-carried buffer base remain GPU-side `IndirectBuffer` accesses.
+The production condition is intentionally limited to supported indirect access
+opcodes and non-host-evaluable descriptor address/size dwords; invalid stride or
+format-only loop values still fail validation. The test executable and native
+emulator target build successfully.
+
+The first live retry exposed a broader set of descriptor expressions rejected as
+`GetBufferResource dword 0 is not a valid runtime value`. They were either GPU
+memory-read results (including `LoadAddressU32` and `ReadConstBuffer`) or
+loop-carried address Phi values. These are now left in shader code for supported
+BDA-backed indirect accesses instead of rejected by host-side descriptor planning.
+On the latest installed build, the previous mass of resource-tracking shader
+rejections and the fatal compute shader `d8959888aafd2552` translation error no
+longer appeared; the process stayed alive through precompile and continued
+submitting compute pipelines. Remaining runtime diagnostics include default
+sampler substitution for heap-selected samplers and a bindless heap record that
+is not a sampled image descriptor. No visual frame has been independently
+captured, so this is a live-startup result, not a gameplay-quality claim.
+
+`SanitizeBonePaletteStaging` remains a title-specific heuristic that rewrites
+zero/degenerate 3x4 matrices using hard-coded row ranges and buffer size. The
+launcher already sets `KYTY_GPU_PALETTE_SANITIZE=0`; production now honors it,
+and only exact `KYTY_GPU_PALETTE_SANITIZE=1` enables the rewrite. This protects
+guest-derived staging bytes by default but does not prove the zero-bone matrix
+root cause is fixed. Required follow-up: capture the draw and relevant producer
+dispatches for the same palette generation, identify the first producer that
+should write the target rows, and compare its inputs/output with the draw. Do not
+use a game ID, shader hash, guest address or fixed bone rows to select a correction.
+
+The broad CTest run reported 189/207 passed (91%); 18 failed, including
+unbuilt optional test executables and remaining shader, materialization, kernel
+filesystem and GPU/cache failures. These have not all been isolated as pre-existing;
+do not call the whole suite green. Keep `KYTY_GPU_PALETTE_SANITIZE=1` only for explicit A/B diagnostics;
+it is not a supported fix and no visual gameplay improvement is claimed.
+
 ## Actual bound temporal image view, 2026-10-15
 
 Game200706/5b82c5 reaches a visible world/cinematic with NGX initialized but
@@ -2499,3 +2540,34 @@ old corpus groups against this fork before selecting ports.
 The fork currently uses sampler/resource substitutions in experimental paths.
 Their visual success is not independent proof of ISA/API correctness. New semantic
 corrections require shared synthetic intended RED/GREEN and affected neighbors.
+
+## Windows Ghost of Yotei follow-up (2026-10-25 23:45 -03:00)
+
+The current local build was rebuilt and deployed to `F:\KytyPS5-Windows-x64\kyty_emulator.exe` after the SrtWalker DWORD-end overflow correction. Focused tests pass: `resource_tracking_tests`, `scalar_provenance_tests`, and `bone_palette_staging_policy_tests` (6 checks). This proves only those local invariants, not a visual/gameplay fix.
+
+Warm/performance runs remain unacceptable and inconsistent: approximately 2.5-16 FPS over frames 185-296, with process working set reaching about 20 GB. A run with `KYTY_OCCLUSION_QUERIES=1` did not prevent the collapse; the host query pool initialized without the hostQueryReset warning, but no 300-frame occlusion summary was captured before stopping. Keep the flag as a diagnostic A/B option, not a proven fix. Avoid leaving the emulator running while it consumes this much RAM.
+
+VTX logs contain genuine exported non-finite positions in several shaders, including `58e7b88265eeaa9b`, `aade60096468d233`, `9f1f009365afc874`, `a1974f29e1101813`, `50e56e7b6de6fdaf`, and `176e4a5fd1fd7205`. The `58e7` report was a GPU-argument draw at RT 3840x2160; one trace at PC `0x16e4` showed the exported position composed from loop-carried values initialized to `0xffffffff` on active lanes and replaced only on a condition (`%589`). This is a lead, not proof that the initialization or branch is wrong; the trace used instance 0 while a reported failing invocation used instance 11, and the attempted auto/instance-11 trace did not produce a joined record. Do not patch arithmetic or install a blanket non-finite-position guard without exact draw-token, stage, vertex/instance/EXEC, buffer/index, and sample-result attribution.
+
+`176e4a5fd1fd7205` also reports huge finite positions on 1024x1024 depth-only draws, which may be ordinary off-frustum shadow geometry. Treat those huge/cull reports as heuristic until correlated with visible artifacts. The palette staging rewrite remains opt-in only; the A/B run did not log any restored matrices, so it is not established as the cause or remedy. Next investigation should capture the actual `58e7` instance-11 invocation with a verified immutable token and full selected shader inputs, then isolate why its position remains non-finite. Do not claim the render or performance issue is fixed.
+
+Follow-up to the 58e7 instance-11 trace: wildcard vertex plus KYTY_VS_VALUE_TRACE_FRAME=auto reported 58e7 at frame 283, vertex 1232 / instance 11, exporting four NaNs on the GPU-argument draw (one index, RT 3840x2160). Auto trace slots initialized on frame 298 for that shader/instance but had no events; the failing invocation was not joined. This is a trace-tooling gap, not evidence the shader is valid. The trace IR shows position outputs may remain bit-pattern 0xffffffff through loop-carried values when %589 is false; this is only a lead because sampled inputs and the condition were not captured. Next attempt: select vertex 1232 / instance 11 explicitly, verify the immutable draw token and actual invocation, and capture image-sample coordinates/results before changing semantics.
+
+
+### 2026-10-25 — narrowed diagnostic instrumentation
+
+Changed `src/graphics/shader/recompiler/ir/passes/BindingLayout.cpp`: when `KYTY_VS_VALUE_TRACE` is enabled, `UsesVertexExplodeLog` now instruments only the selected shader hash, rather than every vertex/mesh shader. With no value-trace selection, the existing general `KYTY_VTX_EXPLODE_CHECK` behavior remains unchanged. This is diagnostic-only and does not alter guest vertex arithmetic or clamp output positions.
+
+Build: `_Build/windows-custom` Ninja target `kyty_emulator` succeeded. Deployed executable SHA-256: `94800cde19131d0291635064b41f09b1af8ed5b2298a1c775f3133ae517de23d`. Backup: `F:\KytyPS5-Windows-x64\kyty_emulator.pre-trace-narrow-20261025.exe`. Tests passed: `shader_vertex_metadata_tests`, `resource_tracking_tests`, `scalar_provenance_tests`, `bone_palette_staging_policy_tests` (6 checks).
+
+A new explicit trace run still failed to produce the selected trace directory/event before memory reached ~19.5 GB; emulator was stopped. The narrowed instrumentation compiles and is deployed, but the exact `58e7` instance-11 invocation remains uncaptured and there is no visual or performance fix yet. Further work should investigate why the selected shader's trace binding is not admitted/observed in the current boot/session and avoid another unrestricted long run.
+
+
+## 2026-10-26 — instance-wildcard value trace follow-up
+
+- Added `*` support for the instance component in `KYTY_VS_VALUE_TRACE`, matching existing wildcard vertex behavior. `hash:*:*` now filters only to invalid F32 expressions or non-finite position exports while allowing any vertex and instance. This is diagnostic-only; it does not alter normal rendering when tracing is disabled.
+- Build: `kyty_emulator` and `resource_tracking_tests` rebuilt; deployed executable SHA-256 `8be1a236f5c73203e45dec7998edf978566805a28c89b623f7818860e8650b54`.
+- Tests passed: `shader_vertex_metadata_tests`, `resource_tracking_tests`, `scalar_provenance_tests`, `bone_palette_staging_policy_tests`. `resource_tracking_tests` emits expected negative-test diagnostics for invalid resource cases but exits successfully.
+- Bounded wildcard trace run used `KYTY_VS_VALUE_TRACE=58e7b88265eeaa9b:*:*`, `KYTY_VS_NF_TRACE=1`; process was stopped by a 17 GB memory guard at ~17.6 GB after ~61 seconds, during shader/pipeline warm-up (~70% of 1476 shaders).
+- It recorded three target-shader draw slots around frame 317, but all were indirect draws with `n=1`, `inst=1`, and no trace events. These are not the known failing invocation (vertex 1232 / instance 11 at frame 283). This supports that the current launch is spending its memory budget in shader/pipeline warm-up and has not reproduced the failing draw before the safety stop; it does not prove the shader is correct.
+- Current deployed build includes diagnostic wildcard-instance support and the earlier selected-shader-only instrumentation gate. No vertex-explosion root cause or FPS improvement has been established. Do not treat this as a graphics fix.

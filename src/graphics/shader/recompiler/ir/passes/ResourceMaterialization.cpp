@@ -170,24 +170,29 @@ bool DecodeBufferDescriptor(const DescriptorValue& descriptor, ShaderBufferResou
 struct ReadCapture {
 	SrtRuntime                                  source;
 	std::vector<std::pair<uint64_t, uint64_t>>& ranges;
+	bool capture_ranges = false;
+	bool ordinary_failed = false;
+	bool strict_failed = false;
 };
 
 bool CaptureStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
 	auto& capture = *static_cast<ReadCapture*>(userdata);
-	if (!capture.source.read_specialization_memory(SpecializationUserdata(capture.source), address,
-	                                               values)) {
+	if (!capture.source.read_specialization_memory(
+	        SpecializationUserdata(capture.source), address, values)) {
+		capture.strict_failed = true;
 		return false;
 	}
-	capture.ranges.emplace_back(address, values.size_bytes());
+	if (capture.capture_ranges) capture.ranges.emplace_back(address, values.size_bytes());
 	return true;
 }
 
 bool CaptureOrdinaryRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
 	auto& capture = *static_cast<ReadCapture*>(userdata);
 	if (!capture.source.read_memory(capture.source.userdata, address, values)) {
+		capture.ordinary_failed = true;
 		return false;
 	}
-	capture.ranges.emplace_back(address, values.size_bytes());
+	if (capture.capture_ranges) capture.ranges.emplace_back(address, values.size_bytes());
 	return true;
 }
 
@@ -453,6 +458,13 @@ bool MaterializeIndirectDescriptor(const ResourcePlan& program, const Roots& roo
 	const auto mapping_offset = snapshot.flattened_srt.size();
 	const auto root_resource  = specializations[resource_index];
 	const auto key_count      = listed.empty() ? keys.size() : listed.size();
+	// Reserve for the worst-case number of distinct candidates before appending children. Without
+	// this, a same-shape refresh can reallocate output vectors when descriptor contents change
+	// from duplicate to distinct, even though the table's topology is unchanged.
+	if (children_begin > maximum_resources) return false;
+	const auto extra_capacity = std::min<size_t>(key_count, maximum_resources - children_begin);
+	descriptors.reserve(children_begin + extra_capacity);
+	specializations.reserve(specializations.size() + extra_capacity);
 	snapshot.flattened_srt.resize(mapping_offset + 1u + key_count * 2u);
 	snapshot.flattened_srt[mapping_offset] = static_cast<uint32_t>(key_count);
 	for (uint32_t entry = 0; entry < key_count; ++entry) {
@@ -522,7 +534,7 @@ Prospero::TextureNumericClass ProbeBindlessHeapClass(const SrtRuntime& runtime, 
 		       runtime.read_specialization_memory(SpecializationUserdata(runtime), address, values);
 	};
 	auto     integer_class = Prospero::TextureNumericClass::Float;
-	uint32_t integers = 0, floats = 0, others = 0, nulls = 0, probed = 0, unreadable = 0;
+	uint32_t integers = 0, floats = 0, others = 0;
 	for (uint32_t key = 0; key < ProbedRecords; key++) {
 		const auto offset = static_cast<uint64_t>(key) * record_stride;
 		if (heap_size != 0u && offset + indirect.table_offset + 16u > heap_size &&
@@ -534,26 +546,21 @@ Prospero::TextureNumericClass ProbeBindlessHeapClass(const SrtRuntime& runtime, 
 		if (indirect.pointer_offset != UINT32_MAX) {
 			std::array<uint32_t, 2> pointer {};
 			if (!read(record + indirect.pointer_offset, pointer)) {
-				unreadable++; // GPU-written or unbacked: look at the next record
 				continue;
 			}
 			const auto target = MaskBindlessPointer(
 			    (static_cast<uint64_t>(pointer[1]) << 32u) | pointer[0], indirect.pointer_mask);
 			if (target == 0u) {
-				nulls++;
 				continue;
 			}
 			address = target + indirect.table_offset;
 		}
 		std::array<uint32_t, 4> dwords {};
 		if (!read(address, dwords)) {
-			unreadable++;
 			continue;
 		}
-		probed++;
 		const auto format = static_cast<Prospero::BufferFormat>((dwords[1] >> 20u) & 0x1ffu);
 		if (format == Prospero::BufferFormat::kInvalid) {
-			nulls++;
 			continue;
 		}
 		const auto type          = static_cast<Prospero::ImageType>((dwords[3] >> 28u) & 0xfu);
@@ -946,9 +953,29 @@ bool BuildSamplerPlan(const ShaderInfo& base, std::span<const ImageResource> ima
 	return true;
 }
 
+static bool CanEvaluateControlFlowCondition(const Program& program, Value condition,
+                                           uint32_t depth = 0) {
+	if (ValidateRuntimeValue(program, condition, RuntimeValueType::Integer)) return true;
+	if (depth >= 32u) return false;
+	const auto* inst = condition.Resolve().TryInstruction();
+	if (inst == nullptr) return false;
+	if (inst->GetOpcode() == ValueOpcode::ReadConstBuffer ||
+	    inst->GetOpcode() == ValueOpcode::LoadAddressU32 ||
+	    inst->GetOpcode() == ValueOpcode::LoadBufferU32) {
+		return true;
+	}
+	// This is only a cheap eligibility hint, not a proof that the complete expression is
+	// host-evaluable. The walker still evaluates the whole predicate and follows both edges if
+	// any varying operand or unsupported opcode prevents evaluation. Traverse comparisons and
+	// arithmetic too, so a scalar-memory leaf inside INotEqual/IMin/etc. is not missed.
+	for (uint32_t arg = 0; arg < inst->NumArgs(); ++arg) {
+		if (CanEvaluateControlFlowCondition(program, inst->Arg(arg), depth + 1u)) return true;
+	}
+	return false;
+}
+
 static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
-	// Any shader write may alias a scalar predicate read, including on a later loop visit.
-	if (program.blocks.size() != program.block_info.size() || HasShaderMemoryWrites(program)) {
+	if (program.blocks.size() != program.block_info.size()) {
 		return {};
 	}
 	if (program.blocks.size() > (1u << 20u)) {
@@ -964,6 +991,9 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 		}
 	}
 	std::vector<ResourceBlock> blocks(program.blocks.size());
+	std::vector<uint8_t> writes(program.blocks.size(), 0u);
+	std::vector<uint8_t> unsafe_predicates(program.blocks.size(), 0u);
+	std::vector<Value> write_handles;
 	for (uint32_t i = 0; i < blocks.size(); i++) {
 		auto&                 block      = blocks[i];
 		const auto&           info       = program.block_info[i];
@@ -973,7 +1003,7 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 			case CFG::TerminatorKind::Branch: successors.push_back(terminator.true_block); break;
 			case CFG::TerminatorKind::ConditionalBranch:
 				successors = {terminator.true_block, terminator.false_block};
-				if (ValidateRuntimeValue(program, info.condition, RuntimeValueType::Integer)) {
+				if (CanEvaluateControlFlowCondition(program, info.condition)) {
 					block.condition = info.condition;
 				}
 				break;
@@ -991,9 +1021,16 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 			block.successors.push_back(found->second);
 		}
 		for (const auto& inst: *program.blocks[i]) {
-			const auto op     = inst.GetOpcode();
-			const auto buffer = BufferAccessOf(op);
-			const auto image  = ImageOpcodeInfoOf(op);
+			const auto op      = inst.GetOpcode();
+			const auto buffer  = BufferAccessOf(op);
+			const auto address = AddressOpcodeInfoOf(op);
+			const auto image   = ImageOpcodeInfoOf(op);
+			if (buffer == BufferAccess::Write || buffer == BufferAccess::Atomic ||
+			    address.access == AddressAccess::Write || image.access == ImageAccess::Write ||
+			    image.access == ImageAccess::Atomic) {
+				writes[i] = 1u;
+				if (inst.NumArgs() != 0u) write_handles.push_back(inst.Arg(0).Resolve());
+			}
 			if (buffer == BufferAccess::None && image.access == ImageAccess::None) {
 				continue;
 			}
@@ -1032,6 +1069,73 @@ static std::vector<ResourceBlock> ResourceControlFlow(const Program& program) {
 		std::ranges::sort(block.sources);
 		block.sources.erase(std::unique(block.sources.begin(), block.sources.end()),
 		                    block.sources.end());
+	}
+	// A write to the same handle as a predicate's memory read can race with that predicate across
+	// shader invocations. Do not specialize that branch from the host-side snapshot.
+	for (auto& block: blocks) {
+		if (block.condition.IsEmpty() || write_handles.empty()) continue;
+		std::vector<const Inst*> pending;
+		std::vector<const Inst*> visited;
+		if (const auto* root = block.condition.Resolve().TryInstruction()) pending.push_back(root);
+		bool aliases_write = false;
+		while (!pending.empty() && !aliases_write) {
+			const auto* inst = pending.back();
+			pending.pop_back();
+			if (std::ranges::find(visited, inst) != visited.end()) continue;
+			visited.push_back(inst);
+			const auto op = inst->GetOpcode();
+			if ((op == ValueOpcode::ReadConstBuffer || op == ValueOpcode::LoadAddressU32 ||
+			     op == ValueOpcode::LoadBufferU32) && inst->NumArgs() != 0u) {
+				const auto handle = inst->Arg(0).Resolve();
+				aliases_write = std::ranges::any_of(write_handles, [&](Value write_handle) {
+					return handle == write_handle || EquivalentValue(program, handle, write_handle);
+				});
+			}
+			for (uint32_t arg = 0; arg < inst->NumArgs(); ++arg) {
+				if (const auto* child = inst->Arg(arg).Resolve().TryInstruction())
+					pending.push_back(child);
+			}
+		}
+		if (aliases_write) {
+			// A predicate sharing its backing handle with a shader write is not a stable host-side
+			// selector. Do not materialize the optional branch from that potentially stale value.
+			block.condition = Value(0u);
+			unsafe_predicates[static_cast<size_t>(&block - blocks.data())] = 1u;
+		}
+	}
+	// A write can invalidate a later scalar predicate, including on a subsequent loop visit.
+	// Keep conditions before every reachable write usable, but conservatively follow both edges
+	// from any condition that a write can reach.
+	for (uint32_t slot = 0; slot < program.srt_reads.size(); ++slot) {
+		for (const auto block_index: program.srt_reads[slot].block_indices) {
+			if (block_index < blocks.size()) blocks[block_index].srt_reads.push_back(slot);
+		}
+	}
+	std::vector<uint8_t> reachable(blocks.size(), 0u);
+	std::vector<uint32_t> pending {0u};
+	while (!pending.empty()) {
+		const auto index = pending.back();
+		pending.pop_back();
+		if (reachable[index] != 0u) continue;
+		reachable[index] = 1u;
+		pending.insert(pending.end(), blocks[index].successors.begin(), blocks[index].successors.end());
+	}
+	std::vector<uint8_t> after_write(blocks.size(), 0u);
+	pending.clear();
+	for (uint32_t index = 0; index < blocks.size(); ++index) {
+		if (reachable[index] != 0u && writes[index] != 0u) pending.push_back(index);
+	}
+	while (!pending.empty()) {
+		const auto index = pending.back();
+		pending.pop_back();
+		if (after_write[index] != 0u) continue;
+		after_write[index] = 1u;
+		pending.insert(pending.end(), blocks[index].successors.begin(), blocks[index].successors.end());
+	}
+	for (uint32_t index = 0; index < blocks.size(); ++index) {
+		if (after_write[index] != 0u && unsafe_predicates[index] == 0u) {
+			blocks[index].condition = {};
+		}
 	}
 	if (std::ranges::none_of(
 	        blocks, [](const ResourceBlock& block) { return !block.condition.IsEmpty(); })) {
@@ -1233,6 +1337,8 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 			return value;
 		}
 		if (source->GetOpcode() == ValueOpcode::ReadFirstLane &&
+		    source->Arg(0).Resolve().TryInstruction() != nullptr &&
+		    source->Arg(0).Resolve().TryInstruction()->GetOpcode() != ValueOpcode::ReadConst &&
 		    ValidateRuntimeValue(program, source->Arg(0))) {
 			// Uniform values need no new EXEC context; preserve their shared evaluation memo.
 			return Clone(source->Arg(0));
@@ -1283,7 +1389,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	}
 	plan.srt_reads.reserve(program.srt_reads.size());
 	for (const auto& read: program.srt_reads) {
-		plan.srt_reads.push_back({Clone(read.value), read.flat_offset});
+		plan.srt_reads.push_back({Clone(read.value), read.flat_offset, read.block_indices});
 	}
 	plan.control_flow = ResourceControlFlow(program);
 	for (auto& block: plan.control_flow) {
@@ -1303,7 +1409,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		masked_image |= !indirect.selector_mask.IsEmpty();
 		// Keys read from a material buffer at a GPU-chosen first record (upstream 5c830604): the
 		// reads are captured so that shader writes cannot change them.
-		capture_indirect |= !indirect.selector_first.IsEmpty();
+		capture_indirect |= !indirect.selector_first.IsEmpty() || !indirect.sources.empty();
 		MarkCleanFlatSlots(plan, Source(plan, indirect.material_source), plan.clean_flat_slots,
 		                   indirect.selector_mask);
 		MarkCleanFlatSlots(plan, nullptr, plan.clean_flat_slots, indirect.selector_first);
@@ -1325,6 +1431,13 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	if (capture_indirect) {
 		plan.capture_specialization_reads = true;
 		plan.resource_tracking_complete &= !program.has_address_writes;
+	}
+	if (!plan.control_flow.empty() &&
+	    (std::ranges::any_of(plan.info.buffers, &BufferResource::written) ||
+	     std::ranges::any_of(plan.info.images, &ImageResource::written))) {
+		plan.capture_specialization_reads = true;
+	}
+	if (plan.capture_specialization_reads) {
 		// Clean writable addresses prove that shader writes cannot overlap captured reads.
 		for (const auto& buffer: plan.info.buffers) {
 			if (buffer.written) MarkCleanFlatSlots(plan, Source(plan, buffer.source), plan.clean_flat_slots);
@@ -1517,13 +1630,18 @@ private:
 
 SrtRuntime ObservedRuntime(const SrtRuntime& runtime, bool capture_reads, ReadCapture& capture) {
 	SrtRuntime observed = runtime;
-	if (capture_reads) {
-		capture.ranges.clear();
-		observed.userdata = &capture;
-		observed.specialization_userdata = nullptr;
+	capture.capture_ranges = capture_reads;
+	capture.ordinary_failed = false;
+	capture.strict_failed = false;
+	capture.ranges.clear();
+	// Keep the original reader contexts inside ReadCapture while routing both evaluators through
+	// the same failure tracker. This makes an unreadable required read distinct from an unsupported
+	// IR operation, without changing the callback userdata seen by either underlying reader.
+	observed.userdata = &capture;
+	observed.specialization_userdata = &capture;
+	if (observed.read_memory != nullptr) observed.read_memory = CaptureOrdinaryRead;
+	if (observed.read_specialization_memory != nullptr)
 		observed.read_specialization_memory = CaptureStrictRead;
-		if (observed.read_memory != nullptr) observed.read_memory = CaptureOrdinaryRead;
-	}
 	return observed;
 }
 
@@ -1582,11 +1700,18 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
                  typename Roots::Walker& walker, ResourceSnapshot& snapshot,
                  ResourceSpecialization& specialization, MaterializationMemo* memo) {
 	auto& reads = program.ThreadScratch().specialization_reads;
+	// Never let the renderer consume read ranges left over from a previous refresh.
+	snapshot.specialization_reads.clear();
 	// The ordinary walker sends conditions that are not direct to its strict walker.
 	const auto active = [&] {
 		MaterializationDiagnostics::PhaseScope phase(MaterializationDiagnostics::Phase::Active);
 		return walker.FindActiveSources();
 	}();
+	// Failed control-flow probes merely make the active-source analysis conservative. Only reads
+	// required by flat/descriptor materialization may block fallback to the reference evaluator.
+	auto& capture = *static_cast<ReadCapture*>(observed.userdata);
+	capture.ordinary_failed = false;
+	capture.strict_failed = false;
 	const bool flat_refreshed = [&] {
 		MaterializationDiagnostics::PhaseScope phase(MaterializationDiagnostics::Phase::Flat);
 		return walker.RefreshFlatBuffer(snapshot.flattened_srt);
@@ -1635,12 +1760,12 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 	MaterializationDiagnostics::Count(MaterializationDiagnostics::Counter::SamplersDeclared,program.info.samplers.size());
 	snapshot.bindless_heaps.clear();
 	snapshot.bindless_sampler_heaps.clear();
-	const auto evaluate = [&](uint32_t source, DescriptorValue& value) {
+	const auto evaluate = [&](uint32_t source, DescriptorValue& value, bool written = false) {
 		if (source >= program.descriptor_sources.size()) {
 			return false;
 		}
 		if (active.empty() || active[source]) {
-			return walker.EvaluateDescriptor(source, value);
+			return (capture_reads && written ? clean : walker).EvaluateDescriptor(source, value);
 		}
 		value = {};
 		value.dword_count = program.descriptor_sources[source].dword_count;
@@ -1656,7 +1781,11 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 	};
 	snapshot.buffers.resize(program.info.buffers.size());
 	// Children of GPU-selected buffers are appended after the program's own buffers.
-	specialization.buffers.assign(program.info.buffers.size(), {});
+	// Resize + fill preserves the vector's allocation on same-shape refreshes; assign may replace
+	// the storage even when the requested size has not changed on some standard-library builds.
+	specialization.buffers.resize(program.info.buffers.size());
+	std::fill(specialization.buffers.begin(), specialization.buffers.end(),
+	          ResourceSpecialization::Buffer {});
 	for (uint32_t i = 0; i < program.info.buffers.size(); ++i) {
 		const auto& buffer = program.info.buffers[i];
 		const auto* source = Source(program, buffer.source);
@@ -1678,19 +1807,8 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 			                                   ShaderInfo::MaxBuffers, NormalizeIndirectStoreBuffer)) {
 				return ReportMaterializeFailure(program, "indirect buffer", i);
 			}
-		} else if (!evaluate(buffer.source, snapshot.buffers[i])) {
+		} else if (!evaluate(buffer.source, snapshot.buffers[i], buffer.written)) {
 			return ReportMaterializeFailure(program, "buffer", i);
-		}
-	}
-	if (capture_reads) {
-		for (uint32_t i = 0; i < program.info.buffers.size(); ++i) {
-			const auto& buffer = program.info.buffers[i];
-			if (!buffer.written || (!active.empty() && !active[buffer.source])) continue;
-			if (const auto* source = Source(program, buffer.source);
-			    source == nullptr || source->indirect_descriptor.has_value()) continue;
-			DescriptorValue strict;
-			if (!clean.EvaluateDescriptor(buffer.source, strict) ||
-			    strict != snapshot.buffers[i]) return ReportMaterializeFailure(program, "strict buffer", i);
 		}
 	}
 	snapshot.images.resize(program.info.images.size());
@@ -1728,9 +1846,22 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 				}
 				continue;
 			}
-			const auto      normalize = [&](DescriptorValue& value) {
+			std::optional<Prospero::TextureNumericClass> indirect_numeric_class;
+			const auto normalize = [&](DescriptorValue& value) {
 				if (NullImageDescriptor(value) || !ValidImageDescriptor(value, image.r128)) {
 					value.dwords.fill(0u);
+					return true;
+				}
+				const auto format = static_cast<Prospero::BufferFormat>((value.dwords[1] >> 20u) & 0x1ffu);
+				const auto numeric_class = Prospero::SampledTextureNumericClass(format);
+				// One shader image slot has one sampled numeric result type. A dynamic table may mix
+				// dimensions (for example 2D and cube), but cannot safely select Float/Uint/Sint
+				// descriptors through the same typed image operation.
+				if (numeric_class != Prospero::TextureNumericClass::Unsupported) {
+					if (indirect_numeric_class && *indirect_numeric_class != numeric_class) {
+						return SpecializationFail("indirect image table mixes numeric classes");
+					}
+					indirect_numeric_class = numeric_class;
 				}
 				return true;
 			};
@@ -1742,7 +1873,7 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 				return ReportMaterializeFailure(program, "indirect image", i);
 			}
 		} else {
-			if (!evaluate(image.source, snapshot.images[i])) {
+			if (!evaluate(image.source, snapshot.images[i], image.written)) {
 				return ReportMaterializeFailure(program, "image", i);
 			}
 			if (!ValidImageDescriptor(snapshot.images[i], image.r128)) {
@@ -1766,6 +1897,9 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 			}
 		}
 	}
+	if (capture.ordinary_failed || capture.strict_failed) {
+		return ReportMaterializeFailure(program, "raw read", 0);
+	}
 	if (capture_reads && !WrittenBuffersDisjoint(program, snapshot, reads))
 		return ReportMaterializeFailure(program, "written buffers overlap reads", 0);
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
@@ -1777,6 +1911,12 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 	if (!specialized) {
 		return false;
 	}
+	if (capture_reads) {
+		// These exact reads protect material-key and descriptor inputs from overlapping guest
+		// writes later in the renderer. Keep them separate from srt_memory_reads, which tracks
+		// mapped metadata residency for DMA consumers.
+		snapshot.specialization_reads.assign(reads.begin(), reads.end());
+	}
 	if constexpr (std::is_same_v<Roots, CompiledRoots>) {
 		if (memo != nullptr && roots.compiled.memoizable) {
 			memo->valid = true;
@@ -1787,11 +1927,12 @@ bool Materialize(const ResourcePlan& program, const Roots& roots, const SrtRunti
 
 bool MaterializeCompiled(const ResourcePlan& program, const SrtRuntime& runtime,
                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
-                         MaterializationMemo* memo) {
+                         MaterializationMemo* memo, bool& read_failed) {
 	MaterializationDiagnostics::Count(MaterializationDiagnostics::Counter::CompiledCalls);
 	MaterializationDiagnostics::PhaseScope setup_phase(MaterializationDiagnostics::Phase::Setup);
 	bool capture_reads = false;
 	bool result        = false;
+	read_failed        = false;
 	if (MaterializationAllowed(program, runtime, capture_reads)) {
 		const auto&  compiled = CompileResourcePlan(program);
 		MaterializationDiagnostics::Count(MaterializationDiagnostics::Counter::FlatSlots,program.srt_reads.size());
@@ -1817,6 +1958,7 @@ bool MaterializeCompiled(const ResourcePlan& program, const SrtRuntime& runtime,
 		setup_phase.End();
 		result = Materialize(program, CompiledRoots {compiled}, runtime, observed, capture_reads,
 		                     clean, walker, snapshot, specialization, memo);
+		read_failed = capture.ordinary_failed || capture.strict_failed;
 	}
 	setup_phase.End();
 	MaterializationDiagnostics::Count(result?MaterializationDiagnostics::Counter::CompiledSuccess:
@@ -1872,6 +2014,12 @@ namespace {
 // Forwards reads to a runtime's readers and logs them.
 class SrtResidencyReads {
 public:
+	struct CachedRead {
+		uint64_t address = 0;
+		size_t word_count = 0;
+		std::vector<uint32_t> values;
+		bool success = false;
+	};
 	SrtResidencyReads(const SrtRuntime& source, ResourceSnapshot& snapshot, bool enabled)
 	    : m_source(source), m_reads(snapshot.srt_memory_reads), m_enabled(enabled) {
 		m_reads.clear();
@@ -1901,7 +2049,32 @@ public:
 		m_reads.resize(count);
 	}
 private:
+	bool SharedReadContext() const {
+		return m_source.read_memory != nullptr &&
+		       m_source.read_memory == m_source.read_specialization_memory &&
+		       m_source.userdata == SpecializationUserdata(m_source);
+	}
+	bool FindSharedRead(uint64_t address, std::span<uint32_t> values, bool& success) {
+		if (!SharedReadContext()) return false;
+		const auto found = std::ranges::find_if(m_cached_reads, [&](const auto& cached) {
+			return cached.address == address && cached.word_count == values.size();
+		});
+		if (found == m_cached_reads.end()) return false;
+		success = found->success;
+		if (success) std::copy(found->values.begin(), found->values.end(), values.begin());
+		return true;
+	}
+	void StoreSharedRead(uint64_t address, std::span<const uint32_t> values, bool success) {
+		if (!SharedReadContext()) return;
+		CachedRead cached;
+		cached.address = address;
+		cached.word_count = values.size();
+		cached.success = success;
+		if (success) cached.values.assign(values.begin(), values.end());
+		m_cached_reads.push_back(std::move(cached));
+	}
 	void Note(uint64_t address, std::span<uint32_t> values, bool success) {
+		if (!m_enabled) return;
 		const auto size = values.size_bytes();
 		if (success && address != 0 && address >= m_source.synthetic_zero_read_end &&
 		    size != 0 && size <= UINT64_MAX - address)
@@ -1909,7 +2082,11 @@ private:
 	}
 	static bool Ordinary(void* opaque, uint64_t address, std::span<uint32_t> values) {
 		auto& self = *static_cast<SrtResidencyReads*>(opaque);
-		const bool success = self.m_source.read_memory(self.m_source.userdata, address, values);
+		bool success = false;
+		if (!self.FindSharedRead(address, values, success)) {
+			success = self.m_source.read_memory(self.m_source.userdata, address, values);
+			self.StoreSharedRead(address, values, success);
+		}
 		self.Note(address, values, success);
 		return success;
 	}
@@ -1921,13 +2098,19 @@ private:
 	}
 	static bool Strict(void* opaque, uint64_t address, std::span<uint32_t> values) {
 		auto& self = *static_cast<SrtResidencyReads*>(opaque);
-		const bool success = self.m_source.read_specialization_memory(SpecializationUserdata(self.m_source), address, values);
+		bool success = false;
+		if (!self.FindSharedRead(address, values, success)) {
+			success = self.m_source.read_specialization_memory(
+			    SpecializationUserdata(self.m_source), address, values);
+			self.StoreSharedRead(address, values, success);
+		}
 		self.Note(address, values, success);
 		return success;
 	}
 	SrtRuntime m_source;
 	std::vector<std::pair<uint64_t, uint64_t>>& m_reads;
 	bool m_enabled;
+	std::vector<CachedRead> m_cached_reads;
 };
 
 class ReadLogger {
@@ -2000,7 +2183,9 @@ bool MaterializeResourcesLogged(const ResourcePlan& program, const SrtRuntime& r
 	}
 	ReadLogger logger(runtime, log);
 	SrtResidencyReads residency(logger.Runtime(), snapshot, program.info.uses_dma);
-	const bool result = MaterializeCompiled(program, residency.Runtime(), snapshot, specialization, nullptr);
+	bool read_failed = false;
+	const bool result = MaterializeCompiled(program, residency.Runtime(), snapshot, specialization,
+	                                        nullptr, read_failed);
 	residency.Finish(result);
 	return result;
 }
@@ -2060,21 +2245,137 @@ bool MaterializeResourcesReference(const ResourcePlan& program, const SrtRuntime
 	return result;
 }
 
+namespace {
+
+class VerificationReadCache {
+public:
+	enum class Kind : uint8_t { Ordinary, Block, Strict };
+	struct Entry {
+		Kind                  kind    = Kind::Ordinary;
+		uint64_t              address = 0;
+		size_t                count   = 0;
+		std::vector<uint32_t> words;
+		bool                  ok      = false;
+	};
+
+	explicit VerificationReadCache(const SrtRuntime& source): m_source(source) {}
+
+	SrtRuntime RecordingRuntime() {
+		auto runtime                    = m_source;
+		runtime.userdata                = this;
+		runtime.specialization_userdata = this;
+		if (m_source.read_memory != nullptr) runtime.read_memory = RecordOrdinary;
+		if (m_source.read_memory_block != nullptr) runtime.read_memory_block = RecordBlock;
+		if (m_source.read_specialization_memory != nullptr)
+			runtime.read_specialization_memory = RecordStrict;
+		return runtime;
+	}
+
+	SrtRuntime ReplayRuntime() {
+		auto runtime                    = m_source;
+		runtime.userdata                = this;
+		runtime.specialization_userdata = this;
+		if (m_source.read_memory != nullptr) runtime.read_memory = ReplayOrdinary;
+		if (m_source.read_memory_block != nullptr) runtime.read_memory_block = ReplayBlock;
+		if (m_source.read_specialization_memory != nullptr)
+			runtime.read_specialization_memory = ReplayStrict;
+		return runtime;
+	}
+
+private:
+	bool Record(Kind kind, uint64_t address, std::span<uint32_t> values) {
+		bool ok = false;
+		switch (kind) {
+			case Kind::Ordinary:
+				ok = m_source.read_memory(m_source.userdata, address, values);
+				break;
+			case Kind::Block:
+				ok = m_source.read_memory_block(m_source.userdata, address, values);
+				break;
+			case Kind::Strict:
+				ok = m_source.read_specialization_memory(SpecializationUserdata(m_source), address,
+				                                         values);
+				break;
+		}
+		Entry entry {.kind = kind, .address = address, .count = values.size(), .ok = ok};
+		if (ok) entry.words.assign(values.begin(), values.end());
+		m_entries.push_back(std::move(entry));
+		return ok;
+	}
+
+	bool Replay(Kind kind, uint64_t address, std::span<uint32_t> values) {
+		for (const auto& entry: m_entries) {
+			if (entry.kind == kind && entry.address == address && entry.count == values.size()) {
+				if (entry.ok) std::copy(entry.words.begin(), entry.words.end(), values.begin());
+				return entry.ok;
+			}
+		}
+		const auto bytes = values.size_bytes();
+		for (const auto& entry: m_entries) {
+			const bool compatible =
+			    entry.kind == kind || (kind == Kind::Ordinary && entry.kind == Kind::Block);
+			const auto entry_bytes = entry.count * sizeof(uint32_t);
+			if (compatible && entry.ok && address >= entry.address &&
+			    ((address - entry.address) & 3u) == 0u && bytes <= entry_bytes &&
+			    address - entry.address <= entry_bytes - bytes) {
+				const auto offset = static_cast<size_t>((address - entry.address) / sizeof(uint32_t));
+				std::copy_n(entry.words.begin() + offset, values.size(), values.begin());
+				return true;
+			}
+		}
+		return Record(kind, address, values);
+	}
+
+	static bool RecordOrdinary(void* opaque, uint64_t address, std::span<uint32_t> values) {
+		return static_cast<VerificationReadCache*>(opaque)->Record(Kind::Ordinary, address, values);
+	}
+	static bool RecordBlock(void* opaque, uint64_t address, std::span<uint32_t> values) {
+		return static_cast<VerificationReadCache*>(opaque)->Record(Kind::Block, address, values);
+	}
+	static bool RecordStrict(void* opaque, uint64_t address, std::span<uint32_t> values) {
+		return static_cast<VerificationReadCache*>(opaque)->Record(Kind::Strict, address, values);
+	}
+	static bool ReplayOrdinary(void* opaque, uint64_t address, std::span<uint32_t> values) {
+		return static_cast<VerificationReadCache*>(opaque)->Replay(Kind::Ordinary, address, values);
+	}
+	static bool ReplayBlock(void* opaque, uint64_t address, std::span<uint32_t> values) {
+		return static_cast<VerificationReadCache*>(opaque)->Replay(Kind::Block, address, values);
+	}
+	static bool ReplayStrict(void* opaque, uint64_t address, std::span<uint32_t> values) {
+		return static_cast<VerificationReadCache*>(opaque)->Replay(Kind::Strict, address, values);
+	}
+
+	SrtRuntime         m_source;
+	std::vector<Entry> m_entries;
+};
+
+} // namespace
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
                           MaterializationMemo* memo) {
+	if (g_verify_materialization) {
+		VerificationReadCache verify_cache(runtime);
+		SrtResidencyReads     residency(verify_cache.RecordingRuntime(), snapshot,
+		                                program.info.uses_dma);
+		bool read_failed = false;
+		bool result = MaterializeCompiled(program, residency.Runtime(), snapshot, specialization,
+		                                  memo, read_failed);
+		residency.Finish(result);
+		VerifyMaterialization(program, verify_cache.ReplayRuntime(), snapshot, specialization,
+		                      result, memo != nullptr && memo->reused);
+		return result;
+	}
 	SrtResidencyReads residency(runtime, snapshot, program.info.uses_dma);
-	bool result = MaterializeCompiled(program, residency.Runtime(), snapshot, specialization, memo);
+	bool read_failed = false;
+	bool result = MaterializeCompiled(program, residency.Runtime(), snapshot, specialization, memo,
+	                                  read_failed);
 	residency.Finish(result);
-	if (!result && !g_verify_materialization) {
+	if (!result && !read_failed) {
 		// The compiled evaluator lacks some IR operations the walker knows (new resource tracking
 		// may bring more); the walker gives the draw its resources instead of skipping it.
 		MaterializationDiagnostics::Count(MaterializationDiagnostics::Counter::ReferenceFallback);
 		result = MaterializeResourcesReference(program, runtime, snapshot, specialization);
-	}
-	if (g_verify_materialization) {
-		VerifyMaterialization(program, runtime, snapshot, specialization, result,
-		                      memo != nullptr && memo->reused);
 	}
 	return result;
 }
@@ -2158,9 +2459,11 @@ void NormalizeBufferSpecialization(ResourceSpecialization& specialization, Shade
 	if (!BufferGenericStage(stage)) {
 		return;
 	}
-	auto generic = specialization.buffers;
-	for (uint32_t i = 0; i < generic.size(); i++) {
-		auto& buffer = generic[i];
+	// Build each candidate on the stack so we can decide whether the generic metadata fits in
+	// push data without copying/replacing the output vector. Resource materialization runs for
+	// every draw; replacing this vector on each refresh invalidates the renderer's cached storage.
+	const auto transformed = [&](uint32_t i) {
+		auto buffer = specialization.buffers[i];
 		if ((buffer.packed_stride & 0x3fffu) != 0u) {
 			buffer.packed_stride = DynamicBufferStride | (buffer.packed_stride & ~0x3fffu);
 		}
@@ -2170,21 +2473,26 @@ void NormalizeBufferSpecialization(ResourceSpecialization& specialization, Shade
 			buffer.descriptor_format  = GenericBufferFormat;
 			buffer.descriptor_swizzle = DstSel(4, 5, 6, 7);
 		}
-	}
-	// The words must fit in push data after the base and the memory offsets (one byte per buffer).
+		return buffer;
+	};
 	uint32_t strides = 0;
 	uint32_t formats = 0;
-	for (const auto& buffer: generic) {
+	for (uint32_t i = 0; i < specialization.buffers.size(); ++i) {
+		const auto buffer = transformed(i);
 		formats += buffer.descriptor_format == GenericBufferFormat ? 1u : 0u;
 		strides += buffer.descriptor_format != GenericBufferFormat &&
 		                   (buffer.packed_stride & DynamicBufferStride) != 0u
 		               ? 1u
 		               : 0u;
 	}
-	const auto dwords = base_dwords + static_cast<uint32_t>(generic.size() + 3u) / 4u +
+	// The words must fit in push data after the base and the memory offsets (one byte per buffer).
+	const auto dwords = base_dwords +
+	                    static_cast<uint32_t>(specialization.buffers.size() + 3u) / 4u +
 	                    (strides + 1u) / 2u + formats;
 	if (dwords <= PushData::DwordCount) {
-		specialization.buffers = std::move(generic);
+		for (uint32_t i = 0; i < specialization.buffers.size(); ++i) {
+			specialization.buffers[i] = transformed(i);
+		}
 	}
 }
 

@@ -937,6 +937,13 @@ void TestUndefinedRuntimeValueFails() {
 
 } // namespace
 
+namespace Log {
+void WriteToConsoleAndLog(std::string_view text) {
+  std::fwrite(text.data(), 1u, text.size(), stderr);
+  std::fflush(stderr);
+}
+} // namespace Log
+
 namespace Common {
 
 int DbgExitIfHandler(const char *, const char *, int) { return 1; }

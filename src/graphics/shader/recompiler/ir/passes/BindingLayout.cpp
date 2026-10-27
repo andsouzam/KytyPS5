@@ -129,6 +129,12 @@ bool UsesVertexExplodeLog(const Program& program) {
 	    (program.stage != ShaderType::Vertex && program.stage != ShaderType::Mesh)) {
 		return false;
 	}
+	// A value-trace run only needs the explode instrumentation on the selected shader.
+	// Instrumenting every vertex shader changes every pipeline and can cause a large
+	// compilation/memory spike before the target draw is reached.
+	if (VertexValueTrace().enabled && !VertexTraceWanted(program.shader_hash)) {
+		return false;
+	}
 	return std::ranges::any_of(program.info.outputs, [](const StageOutput& output) {
 		return output.kind == StageOutputKind::Position && output.index == 0;
 	});

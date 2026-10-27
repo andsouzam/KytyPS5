@@ -33,6 +33,7 @@ is under test), vertex explosions on some meshes and missing vegetation in some 
 | `KYTY_IMAGE_RESIZE_SYNC` | Dynamic resolution: images of different sizes at one guest address copy the shared rectangle from the most recently written one. |
 | `KYTY_STENCIL_KEEP_FIX` | When a depth buffer is briefly used as a color image, its whole stencil plane is kept and given back; without a kept stencil the plane is cleared to 0 instead of left undefined (white interior walls). |
 | `KYTY_STENCIL_FROM_R8` | A depth buffer coming back from color use takes its stencil from the same-size 8-bit stencil image shaders wrote in between. |
+| `KYTY_GPU_PALETTE_SANITIZE=1` | Experimental, game-specific staging rewrite for degenerate bone matrices. Disabled unless explicitly set to exactly `1`; it changes guest-derived bytes and is not a correctness fix. Prefer draw snapshots and producer tracing to establish why the guest data is zero. |
 | `KYTY_META_CLEAR_ZMASK` | A compute fill over HTile memory only counts as a depth clear when its words mean "cleared". |
 | `KYTY_BC_BUFFER_WRITES` | Block-compressed textures take GPU buffer writes that do not start at their first byte. |
 | `KYTY_COLOR_FEEDBACK_COPY` / `KYTY_COLOR_FEEDBACK_LAYOUT` | A draw that reads the picture it renders to reads a copy, or uses the attachment feedback loop layout. |

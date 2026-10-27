@@ -10,7 +10,7 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 // Diagnostic collection only. CHECK=1 supplies the existing internal fault buffer and builtins.
-// KYTY_VS_VALUE_TRACE=<hex hash>:<vertex>:<instance>[:<PC>,...] (PCs include 0x prefixes).
+// KYTY_VS_VALUE_TRACE=<hex hash>:<vertex|*>:<instance|*>[:<PC>,...] (PCs include 0x prefixes).
 struct VertexValueTraceSettings {
 	bool enabled = false;
 	bool nonfinite = false;
@@ -19,6 +19,10 @@ struct VertexValueTraceSettings {
 	std::array<uint32_t, 16> pcs {};
 	uint32_t pc_count = 0;
 };
+
+// Multiple immutable draw slots let wildcard traces survive frame-to-frame changes in the
+// GPU-generated index buffer until a failing vertex invocation is encountered.
+inline constexpr uint32_t VertexTraceDrawSlots = 128;
 
 inline const VertexValueTraceSettings& VertexValueTrace() {
 	static const auto settings = [] {
@@ -29,13 +33,27 @@ inline const VertexValueTraceSettings& VertexValueTrace() {
 		result.hash = std::strtoull(text, &end, 16);
 		if (end == text || *end != ':' || result.hash == 0) return result;
 		text = end + 1;
-		const auto vertex = std::strtoull(text, &end, 0);
-		if (end == text || *end != ':' || vertex > UINT32_MAX) return result;
-		result.vertex = static_cast<uint32_t>(vertex);
+		if (*text == '*') {
+			// Wildcard mode captures the first invalid scalar from any vertex invocation;
+			// the emitter suppresses ordinary position/read events in this mode.
+			result.vertex = UINT32_MAX;
+			end = const_cast<char*>(text + 1);
+		} else {
+			const auto vertex = std::strtoull(text, &end, 0);
+			if (end == text || vertex > UINT32_MAX) return result;
+			result.vertex = static_cast<uint32_t>(vertex);
+		}
+		if (*end != ':') return result;
 		text = end + 1;
-		const auto instance = std::strtoull(text, &end, 0);
-		if (end == text || instance > UINT32_MAX || (*end != '\0' && *end != ':')) return result;
-		result.instance = static_cast<uint32_t>(instance);
+		if (*text == '*') {
+			result.instance = UINT32_MAX;
+			end = const_cast<char*>(text + 1);
+		} else {
+			const auto instance = std::strtoull(text, &end, 0);
+			if (end == text || instance > UINT32_MAX) return result;
+			result.instance = static_cast<uint32_t>(instance);
+		}
+		if (*end != '\0' && *end != ':') return result;
 		if (*end == ':') {
 			text = end + 1;
 			if (*text == '\0') return VertexValueTraceSettings {};
@@ -72,14 +90,14 @@ inline std::string VertexTraceCacheSignature() {
 	const auto& settings = VertexValueTrace();
 	if (!settings.enabled) return {};
 	auto text = "vtxtrace=1:" + std::to_string(settings.hash) + ":" +
-	            std::to_string(settings.vertex) + ":" + std::to_string(settings.instance);
+	            std::to_string(settings.vertex) + ":" + std::to_string(settings.instance) +
+	            ":slots=" + std::to_string(VertexTraceDrawSlots);
 	for (uint32_t i = 0; i < settings.pc_count; ++i) text += ":" + std::to_string(settings.pcs[i]);
 	if (settings.nonfinite) text += ":nf=2";
 	return text + "\n";
 }
 
 enum class VertexTraceKind : uint32_t { Buffer = 1, Image = 2, PreClip = 3, PostClip = 4, NonFinite = 5 };
-inline constexpr uint32_t VertexTraceDrawSlots = 2;
 inline constexpr uint32_t VertexTraceHeaderWords = 16;
 inline constexpr uint32_t VertexTraceEventWords = 24;
 inline constexpr uint32_t VertexTraceEvents = 32;

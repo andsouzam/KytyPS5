@@ -119,6 +119,9 @@ struct State {
 	std::array<ValueTraceDraw, IR::VertexTraceDrawSlots> value_traces;
 	uint32_t value_trace_count = 0;
 	bool value_trace_limit_reported = false;
+	// Auto mode waits for the selected shader's first observed non-finite position, then
+	// traces the following frame so its first 32 draws don't get consumed by earlier valid draws.
+	std::atomic<uint64_t> value_trace_auto_frame {0};
 };
 
 State& GetState() {
@@ -458,19 +461,25 @@ uint64_t RegisterValueTrace(RenderContext& context, const DrawNote& note, uint64
 	if (!settings.enabled) return 0;
 	static const uint64_t first_frame = [] {
 		const char* text = KYTY_GETENV("KYTY_VS_VALUE_TRACE_FRAME");
-		return text != nullptr ? std::strtoull(text, nullptr, 0) : 0ull;
+		return text != nullptr && std::strcmp(text, "auto") == 0 ? UINT64_MAX
+		                                                               : (text != nullptr ? std::strtoull(text, nullptr, 0) : 0ull);
 	}();
-	if (note.frame < first_frame) return 0;
+	if (first_frame != 0xffffffffffffffffull && note.frame < first_frame) return 0;
 	bool selected = false;
 	for (const auto& stage: note.stages)
 		selected |= stage.stage.program != nullptr && stage.stage.program->bindings.vertex_value_trace;
 	if (!selected) return 0;
 	auto& state = GetState();
+	if (first_frame == 0xffffffffffffffffull) {
+		const auto automatic_frame = state.value_trace_auto_frame.load(std::memory_order_relaxed);
+		if (automatic_frame == 0 || note.frame < automatic_frame) return 0;
+	}
 	std::lock_guard lock(state.mutex);
 	if (state.value_trace_count == state.value_traces.size()) {
 		if (!state.value_trace_limit_reported) {
 			state.value_trace_limit_reported = true;
-			std::printf("VertexValueTrace: draw budget exhausted (2 immutable slots); later draws have token=0\n");
+			std::printf("VertexValueTrace: draw budget exhausted (%u immutable slots); later draws have token=0\n",
+			            IR::VertexTraceDrawSlots);
 		}
 		return 0;
 	}
@@ -782,6 +791,14 @@ void Report(const uint32_t* region, uint64_t frame) {
 		const auto hash = uint64_t {record[1]} | (uint64_t {record[2]} << 32u);
 		if (kind >= 4) {
 			continue;
+		}
+		// Auto value-trace mode starts on the frame after the selected shader's first
+		// observed non-finite position, avoiding slot exhaustion on earlier valid draws.
+		if (kind == static_cast<uint32_t>(IR::VertexExplodeKind::NonFinite) &&
+		    IR::VertexValueTrace().enabled && hash == IR::VertexValueTrace().hash) {
+			uint64_t expected = 0;
+			state.value_trace_auto_frame.compare_exchange_strong(expected, frame + 1u,
+			                                                     std::memory_order_relaxed);
 		}
 		// Trace-layout vertex shaders write this immutable draw token into otherwise unused
 		// record words. Report valid joins before the older per-hash/kind suppression: a

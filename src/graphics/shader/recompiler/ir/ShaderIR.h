@@ -654,8 +654,9 @@ struct DescriptorSource {
 };
 
 struct SrtRead {
-	Value    value;
-	uint32_t flat_offset = 0;
+	Value                 value;
+	uint32_t              flat_offset = 0;
+	std::vector<uint32_t> block_indices;
 
 	bool operator==(const SrtRead& other) const = default;
 };
@@ -742,14 +743,20 @@ struct ResourceNode {
 		ULessThan32,
 		ULessThanEqual32,
 		UGreaterThan32,
+		UGreaterThanEqual32,
+		SLessThan32,
+		SLessThanEqual32,
+		SGreaterThan32,
 		SGreaterThanEqual32,
 		LogicalAnd,
 		LogicalOr,
 		LogicalXor,
 		LogicalNot,
 	};
-	static constexpr uint32_t NoNode   = UINT32_MAX;
-	static constexpr uint8_t  CleanSlot = 1u;
+	static constexpr uint32_t NoNode         = UINT32_MAX;
+	static constexpr uint8_t  CleanSlot      = 1u;
+	static constexpr uint8_t  VectorBuffer   = 2u;
+	static constexpr uint8_t  ImmediateGuard = 4u;
 
 	Op                      op    = Op::Fail;
 	uint8_t                 flags = 0;
@@ -873,6 +880,7 @@ struct ResourcePlan {
 		uint32_t                                      evaluation_depth = 0;
 		std::vector<uint8_t>                          active_sources;
 		std::vector<uint8_t>                          visited_blocks;
+		std::vector<uint8_t>                          active_srt_reads;
 		std::vector<uint32_t>                         pending_blocks;
 		std::vector<uint32_t>                         material_keys;
 		std::vector<std::pair<uint64_t, uint64_t>>    specialization_reads;
