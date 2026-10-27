@@ -2183,6 +2183,7 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 	constexpr int ORBIS_SO_NBIO = 0x1200;
 	if (ConvertSocketOptionLevel(level) == SOL_SOCKET && optname == ORBIS_SO_NBIO &&
 	    optlen >= sizeof(int)) {
+#if defined(_WIN32)
 		std::lock_guard lock(state.transport->option_mutex);
 		u_long enabled = (*static_cast<const int*>(optval) != 0 ? 1 : 0);
 		if (ioctlsocket(socket, FIONBIO, &enabled) == SOCKET_ERROR) {
@@ -2190,7 +2191,17 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 		}
 		state.transport->nonblocking = enabled != 0;
 		return 0;
+#else
+		const bool enabled = *static_cast<const int*>(optval) != 0;
+		const int  flags   = ::fcntl(socket, F_GETFL, 0);
+		if (flags < 0 ||
+		    ::fcntl(socket, F_SETFL, enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK)) != 0) {
+			return SetHostSocketError();
+		}
+		return 0;
+#endif
 	}
+#if defined(_WIN32)
 	if (ConvertSocketOptionLevel(level) == SOL_SOCKET && optname == 0x1006) {
 		DWORD timeout_ms = 0;
 		if (optlen == sizeof(NetTimeval)) {
@@ -2221,6 +2232,7 @@ int KYTY_SYSV_ABI Setsockopt(int s, int level, int optname, const void* optval, 
 		state.transport->receive_timeout_ms = timeout_ms;
 		return 0;
 	}
+#endif
 #if !defined(_WIN32)
 	// Guest TCP options: IPPROTO_TCP=6, TCP_NODELAY=1.
 	if (level != 6 || optname != 1) {

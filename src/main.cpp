@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -726,11 +727,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		} else if (arg == "--red-zone-protection") {
 			if (!ParseBool(value, options.config.red_zone_protection_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
 				return false;
 			}
+#endif
 		} else if (arg == "--record-thread") {
 			if (!ParseBool(value, options.config.record_thread_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());
