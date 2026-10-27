@@ -1,19 +1,25 @@
-name: Build and Release BryKytyPS5
+name: Build and Release KytyPS5 (Yotei)
 
-# Releases are cut by hand (Actions > Build and Release BryKytyPS5 > Run workflow), so only work
-# Bryan has chosen to publish is released, and pushes to the private repo cost no build minutes.
 on:
+  push:
+    branches:
+      - yotei-bringup
+      - main
+  pull_request:
+    branches:
+      - yotei-bringup
+      - main
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   SCCACHE_GHA_ENABLED: "true"
-  # Official (release-tagged) builds only in the public BryKytyPS5 repository; copies build as forks.
-  KYTY_BUILD_ORIGIN: ${{ github.repository == 'BryanKAdams/BryKytyPS5' && 'Official' || 'Fork' }}
+  KYTY_BUILD_ORIGIN: ${{ (github.repository == 'andsouzam/KytyPS5' || github.repository == 'BryanKAdams/BryKytyPS5') && 'Official' || 'Fork' }}
   KYTY_BUILD_REPOSITORY: ${{ github.repository }}
+  KYTY_PINNED_SHADER_CACHE_KEY: "aaeb0f01f465c27db0fbd0ab9b1a10b14748c69242cb1cce102d130a28aeba4b"
 
 jobs:
   metadata:
@@ -27,7 +33,7 @@ jobs:
         id: release_tag
         shell: bash
         run: |
-          echo "value=BryKytyPS5-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "value=KytyPS5-Yotei-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Build KytyPS5 (Windows)
@@ -103,6 +109,8 @@ jobs:
             -DKYTY_BUILD_ORIGIN=%KYTY_BUILD_ORIGIN% ^
             -DKYTY_BUILD_REPOSITORY=%KYTY_BUILD_REPOSITORY% ^
             -DKYTY_RELEASE_TAG=${{ needs.metadata.outputs.release_tag }} ^
+            -DKYTY_SHADER_CACHE_KEY=%KYTY_PINNED_SHADER_CACHE_KEY% ^
+            -DKYTY_WINDOWS_HOST_ASLR=ON ^
             -DCMAKE_C_COMPILER=clang-cl ^
             -DCMAKE_CXX_COMPILER=clang-cl ^
             -DCMAKE_C_COMPILER_LAUNCHER=sccache ^
@@ -113,7 +121,7 @@ jobs:
         shell: cmd
         run: |
           cmake --build _Build/windows --target launcher ^
-            audio_out2_port_tests pad_haptics_tests controller_settings_tests ime_dialog_tests lru_cache_tests virtual_memory_allocation_tests ^
+            audio_out2_port_tests pad_haptics_tests controller_settings_tests ime_dialog_tests lru_cache_tests host_thread_tests bone_palette_staging_policy_tests virtual_memory_allocation_tests ^
             shader_recompiler_compute_tests ^
             resource_tracking_tests scalar_provenance_tests ^
             resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests --parallel
@@ -121,12 +129,15 @@ jobs:
       - name: Test
         shell: cmd
         run: |
-          ctest --test-dir _Build/windows --output-on-failure -R "^(audio_out2_port|pad_haptics|controller_settings|ime_dialog|lru_cache|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$"
+          ctest --test-dir _Build/windows --output-on-failure -R "^(audio_out2_port|pad_haptics|controller_settings|ime_dialog|lru_cache|host_thread|bone_palette_staging_policy|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$"
 
       - name: Install
         shell: cmd
         run: |
           cmake --install _Build/windows --prefix _Build/windows/install
+          if exist scripts\run_yotei.bat copy /Y scripts\run_yotei.bat _Build\windows\install\
+          if exist scripts\precompile_yotei_shaders.bat copy /Y scripts\precompile_yotei_shaders.bat _Build\windows\install\
+          if exist scripts\kyty_settings.ini copy /Y scripts\kyty_settings.ini _Build\windows\install\
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -191,6 +202,7 @@ jobs:
             -DKYTY_BUILD_ORIGIN="$KYTY_BUILD_ORIGIN" \
             -DKYTY_BUILD_REPOSITORY="$KYTY_BUILD_REPOSITORY" \
             -DKYTY_RELEASE_TAG="${{ needs.metadata.outputs.release_tag }}" \
+            -DKYTY_SHADER_CACHE_KEY="$KYTY_PINNED_SHADER_CACHE_KEY" \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
@@ -202,7 +214,7 @@ jobs:
         shell: bash
         run: |
           cmake --build _Build/macos \
-            --target launcher audio_out2_port_tests pad_haptics_tests controller_settings_tests ime_dialog_tests lru_cache_tests virtual_memory_allocation_tests \
+            --target launcher audio_out2_port_tests pad_haptics_tests controller_settings_tests ime_dialog_tests lru_cache_tests host_thread_tests bone_palette_staging_policy_tests virtual_memory_allocation_tests \
               memory_tracker_tests page_manager_tests shader_recompiler_compute_tests \
               resource_tracking_tests scalar_provenance_tests \
               resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests \
@@ -212,7 +224,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir _Build/macos --output-on-failure \
-            -R '^(audio_out2_port|pad_haptics|controller_settings|ime_dialog|lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$'
+            -R '^(audio_out2_port|pad_haptics|controller_settings|ime_dialog|lru_cache|host_thread|bone_palette_staging_policy|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$'
 
       - name: Install
         shell: bash
@@ -360,6 +372,7 @@ jobs:
             -DKYTY_BUILD_ORIGIN="$KYTY_BUILD_ORIGIN" \
             -DKYTY_BUILD_REPOSITORY="$KYTY_BUILD_REPOSITORY" \
             -DKYTY_RELEASE_TAG="${{ needs.metadata.outputs.release_tag }}" \
+            -DKYTY_SHADER_CACHE_KEY="$KYTY_PINNED_SHADER_CACHE_KEY" \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
@@ -386,7 +399,7 @@ jobs:
         run: |
           cmake --build _Build/linux \
             --target launcher page_manager_tests memory_tracker_tests \
-              audio_out2_port_tests pad_haptics_tests controller_settings_tests ime_dialog_tests lru_cache_tests virtual_memory_allocation_tests \
+              audio_out2_port_tests pad_haptics_tests controller_settings_tests ime_dialog_tests lru_cache_tests host_thread_tests bone_palette_staging_policy_tests virtual_memory_allocation_tests \
               resource_tracking_tests scalar_provenance_tests \
               resource_materialization_tests shader_vertex_metadata_tests archive_file_tests avplayer_file_tests \
             --parallel
@@ -395,7 +408,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir _Build/linux --output-on-failure \
-            -R '^(audio_out2_port|pad_haptics|controller_settings|ime_dialog|lru_cache|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$'
+            -R '^(audio_out2_port|pad_haptics|controller_settings|ime_dialog|lru_cache|host_thread|bone_palette_staging_policy|memory_tracker|page_manager|resource_tracking|scalar_provenance|resource_materialization|shader_vertex_metadata|archive_file|avplayer_file|virtual_memory_allocation)$'
 
       - name: Install
         shell: bash
@@ -431,11 +444,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Release BryKytyPS5
+    name: Release KytyPS5 (Yotei)
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
-      github.repository == 'BryanKAdams/BryKytyPS5' &&
+      (github.repository == 'andsouzam/KytyPS5' || github.repository == 'BryanKAdams/BryKytyPS5') &&
       (needs.windows.result == 'success' ||
        needs.macos.result == 'success' ||
        needs.linux.result == 'success')

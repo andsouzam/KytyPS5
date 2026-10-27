@@ -202,3 +202,17 @@ kyty_emulator.exe ^
   Execute sempre o script `scripts\precompile_yotei_shaders.bat` antes de rodar o jogo para garantir que o cache `_PipelineCache\PPSA26344.bin` esteja preenchido.
 * **Falta de Memória VRAM (Out of Device Memory)**:  
   Mantenha a resolução em 1080p (`--screen-width 1920 --screen-height 1080`). Resoluções 4K excedem facilmente o limite de 8 GB da RTX 3070.
+
+
+---
+
+## 🤖 Build Automático com GitHub Actions (CI/CD)
+
+O projeto possui o workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) configurado para compilar, testar e empacotar automaticamente o emulador na nuvem:
+
+* **Disparo Automático (`push` / `pull_request`)**:  
+  Todo `git push` para a branch `yotei-bringup` (ou `main`) dispara a compilação em paralelo para **Windows x64** (`clang-cl` + LTO + `sccache`), **Linux x64** e **macOS x86_64**, executa a suíte de testes (`ctest`, incluindo `host_thread` e `bone_palette_staging_policy`) e publica o pacote completo `KytyPS5-Windows-x64` (já com `kyty_emulator.exe`, `launcher.exe`, DLLs do Qt6 e os scripts `run_yotei.bat`, `precompile_yotei_shaders.bat` e `kyty_settings.ini`) na aba **Actions -> Artifacts**.
+* **Compatibilidade de Cache de Shaders**:  
+  O workflow fixa automaticamente a `KYTY_SHADER_CACHE_KEY`, garantindo que qualquer executável baixado do GitHub Actions funcione diretamente com o seu `_PipelineCache\PPSA26344.bin` local sem precisar recompilar shaders do zero.
+* **Geração de Release Oficial (`workflow_dispatch`)**:  
+  Acessando **Actions -> Build and Release KytyPS5 (Yotei) -> Run workflow** no GitHub, além de gerar os artefatos, o workflow cria automaticamente uma **GitHub Release** com os arquivos `.zip` / `.tar.gz` prontos para download.
