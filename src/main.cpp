@@ -219,6 +219,7 @@ static constexpr Flag FLAGS[] = {
     {"--readback-tiled-images", &ConfigOptions::readback_tiled_images},
     {"--readback-storage-images", &ConfigOptions::readback_storage_images},
     {"--sync-raw-image-buffers", &ConfigOptions::sync_raw_image_buffers},
+    {"--trophy-notifications", &ConfigOptions::trophy_enabled},
     {"--no-trophy-notifications", &ConfigOptions::trophy_enabled, false},
     {"--perf-overlay", &ConfigOptions::perf_overlay_enabled},
     {"--playgo-hack", &ConfigOptions::playgo_hack_enabled},
@@ -228,7 +229,69 @@ static constexpr Flag FLAGS[] = {
 #endif
 };
 
-static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
+static bool g_shader_cache_given      = false;
+static bool g_tessellation_given      = false;
+static bool g_occlusion_queries_given = false;
+
+static std::string DetectTitleId(const RunOptions& options, const std::string& game_arg) {
+	if (!options.app0_dir.empty()) {
+		const auto json = options.app0_dir / "sce_sys" / "param.json";
+		if (Common::File::IsFileExisting(json)) {
+			if (auto* file = std::fopen(Common::PathToString(json).c_str(), "rb")) {
+				std::string text(65536, '\0');
+				text.resize(std::fread(text.data(), 1, text.size(), file));
+				std::fclose(file);
+				if (const auto key = text.find("\"titleId\""); key != std::string::npos) {
+					const auto open  = text.find('"', text.find(':', key) + 1);
+					const auto close = open != std::string::npos ? text.find('"', open + 1) : open;
+					if (close != std::string::npos) {
+						return text.substr(open + 1, close - open - 1);
+					}
+				}
+			}
+		}
+	}
+	for (const char* prefix: {"PPSA", "CUSA"}) {
+		for (auto at = game_arg.find(prefix); at != std::string::npos;
+		     at      = game_arg.find(prefix, at + 1)) {
+			if (at + 9 <= game_arg.size() &&
+			    std::all_of(game_arg.begin() + static_cast<std::ptrdiff_t>(at + 4),
+			                game_arg.begin() + static_cast<std::ptrdiff_t>(at + 9),
+			                [](char c) { return c >= '0' && c <= '9'; })) {
+				return game_arg.substr(at, 9);
+			}
+		}
+	}
+	return {};
+}
+
+static void ApplyTitleDefaults(RunOptions& options, const std::string& game_arg) {
+	if (DetectTitleId(options, game_arg) != "PPSA26344") {
+		return;
+	}
+	if (std::ranges::none_of(options.addcont, [](const auto& entry) {
+		    return entry.entitlement_label == "GHOST2BASE000000";
+	    })) {
+		options.addcont.push_back(Common::AddContentEntry {{}, "GHOST2BASE000000", {}, {}});
+	}
+	if (!g_shader_cache_given) {
+		options.config.shader_cache_enabled = true;
+	}
+	if (!g_tessellation_given) {
+		options.config.tessellation_enabled = true;
+	}
+	if (!g_occlusion_queries_given) {
+		options.config.occlusion_queries_enabled = true;
+	}
+	::printf("Title profile PPSA26344: addcont=GHOST2BASE000000, shader-cache=%s, "
+	         "tessellation=%s, occlusion-queries=%s\n",
+	         options.config.shader_cache_enabled ? "on" : "off",
+	         options.config.tessellation_enabled ? "on" : "off",
+	         options.config.occlusion_queries_enabled ? "on" : "off");
+}
+
+static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help,
+                      std::string& raw_game_arg) {
 	show_help = false;
 
 	for (int i = 1; i < argc; i++) {
@@ -240,8 +303,43 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			continue;
 		}
 
+		if (arg == "--no-shader-cache") {
+			g_shader_cache_given                = true;
+			options.config.shader_cache_enabled = false;
+			continue;
+		}
+		if (arg == "--no-tessellation") {
+			g_tessellation_given                = true;
+			options.config.tessellation_enabled = false;
+			continue;
+		}
+		if (arg == "--no-occlusion-queries") {
+			g_occlusion_queries_given                = true;
+			options.config.occlusion_queries_enabled = false;
+			continue;
+		}
+		if (arg == "--dualsense-fix") {
+			continue;
+		}
+
 		if (const auto* flag = std::ranges::find(FLAGS, arg, &Flag::name); flag != std::end(FLAGS)) {
-			options.config.*flag->field = flag->value;
+			bool enabled = flag->value;
+			if (i + 1 < argc) {
+				const std::string_view next(argv[i + 1]);
+				if (next == "true" || next == "false") {
+					const bool parsed = (next == "true");
+					enabled           = flag->value ? parsed : !parsed;
+					i++;
+				}
+			}
+			if (arg == "--shader-cache") {
+				g_shader_cache_given = true;
+			} else if (arg == "--tessellation") {
+				g_tessellation_given = true;
+			} else if (arg == "--occlusion-queries") {
+				g_occlusion_queries_given = true;
+			}
+			options.config.*flag->field = enabled;
 			continue;
 		}
 
@@ -262,6 +360,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 
 			value           = Common::FixFilenameSlash(value);
+			raw_game_arg    = value;
 			const auto path = Common::PathFromUtf8(value);
 
 			if (Common::File::IsDirectoryExisting(path)) {
@@ -445,6 +544,10 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				return false;
 			}
 			options.config.keymap.push_back(value);
+		} else if (arg == "--shader-optimization-type" || arg == "--audio-master-volume" ||
+		           arg == "--audio-main-volume" || arg == "--audio-music-volume" ||
+		           arg == "--audio-pad-speaker-volume" || arg == "--game-preset-priority") {
+			continue;
 		} else {
 			::printf("unknown option: %s\n", arg.c_str());
 			return false;
@@ -461,15 +564,16 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 static int Main(int argc, char* argv[]) {
 	InitializeThreads();
 
-	RunOptions options;
-	bool       show_help = false;
+	RunOptions  options;
+	bool        show_help = false;
+	std::string raw_game_arg;
 
 	if (argc < 2) {
 		PrintUsage();
 		return 0;
 	}
 
-	if (!ParseArgs(argc, argv, options, show_help)) {
+	if (!ParseArgs(argc, argv, options, show_help, raw_game_arg)) {
 		PrintUsage();
 		return 1;
 	}
@@ -478,6 +582,8 @@ static int Main(int argc, char* argv[]) {
 		PrintUsage();
 		return 0;
 	}
+
+	ApplyTitleDefaults(options, raw_game_arg);
 
 	Run(options);
 
